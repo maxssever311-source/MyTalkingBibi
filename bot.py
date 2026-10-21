@@ -469,7 +469,7 @@ async def cmd_kompromat(message: Message):
 
     await update_user(user["user_id"], shekels=user["shekels"] - cost)
     success = random.random() < 0.60
-        if success:
+    if success:
         new_loyalty = max(0, victim["loyalty"] - 30)
         await update_user(victim["user_id"], loyalty=new_loyalty)
         await message.reply(
@@ -513,6 +513,7 @@ async def cmd_veto(message: Message):
         parse_mode="HTML"
     )
 
+# --- ПАРТИЙНЫЕ БЛОКИ (ФРАКЦИИ) ---
 @dp.message(Command("found_bloc"))
 async def cmd_found_bloc(message: Message, command: CommandObject):
     user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
@@ -565,6 +566,7 @@ async def cmd_bloc_sponsor(message: Message, command: CommandObject):
         await db.commit()
     await message.reply(f"🌍 <b>Внешний вектор фракции «{bloc['name']}» изменен:</b> {sponsor}.", parse_mode="HTML")
 
+# --- КАЗИНО «МИФАЛЬ ХА-БЛЕФ» И НАПЕРСТКИ ---
 @dp.message(Command("slots"))
 async def cmd_slots(message: Message, command: CommandObject):
     if is_shabbat():
@@ -661,6 +663,7 @@ async def cmd_thimbles(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
+# --- СПЕЦБУФЕТ (МАГАЗИН) ---
 @dp.message(Command("shop"))
 async def cmd_shop(message: Message):
     text = (
@@ -673,6 +676,7 @@ async def cmd_shop(message: Message):
     )
     await message.reply(text, reply_markup=get_shop_keyboard(), parse_mode="HTML")
 
+# --- СТАРЫЕ ДИРЕКТИВЫ: УДАР, КРАСНАЯ ЛИНИЯ, ПЕЙДЖЕР ---
 async def execute_strike(target_user, chat_id: int, reply_func, restrict_func):
     outcome = random.random()
     win_threshold = 0.35 + (target_user["rank"] * 0.05)
@@ -750,6 +754,7 @@ async def cmd_pager(message: Message):
         parse_mode="HTML"
     )
 
+# --- ОБРАБОТКА ИНЛАЙН КНОПОК ---
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery):
     data = callback.data
@@ -810,6 +815,7 @@ async def process_callbacks(callback: CallbackQuery):
             await callback.message.reply("📟 <b>Заминированный пейджер добавлен в ваш инвентарь.</b> Используйте реплаем /pager для ликвидации.", parse_mode="HTML")
             await callback.answer()
 
+# --- ДВУХКОНТУРНЫЙ СЕМАНТИЧЕСКИЙ АНАЛИЗАТОР И ЧАТ-ЛОГИКА ---
 TRIGGER_WORDS = {
     "цахал", "моссад", "шабак", "купол", "меркав", "пейджер", "бункер", "кирь",
     "биби", "нетаньяху", "ликуд", "коалици", "реформ", "побед", "сигар",
@@ -878,36 +884,38 @@ async def handle_chat_messages(message: Message):
             score_text = res.text.strip().replace("+", "")
             delta = int(score_text)
         except Exception:
-    delta = 0
+            delta = 0
 
-if delta != 0:
-    new_loyalty = max(0, min(100, user["loyalty"] + (delta * 3)))
-    await update_user(user["user_id"], loyalty=new_loyalty)
-    
-    if delta <= -2:
-        async with aiosqlite.connect(DB_FILE) as db:
-            cursor = await db.execute("SELECT value FROM system_state WHERE key = 'martial_law'")
-            row = await cursor.fetchone()
-            if row and row[0] > now_iso:
-                await apply_chat_mute(message, user["user_id"], 15, "Крамольные высказывания в период военного положения!")
-                return
-                
-        await message.reply(
-            f"👁 <b>ШАБАК фиксирует крамолу:</b>\n"
-            f"Субъект: {user['full_name']} (Лояльность: {new_loyalty}%). Дело передано в военный трибунал.",
-            parse_mode="HTML"
-        )
-    elif delta >= 2:
-        await message.reply(
-            f"📜 <b>Канцелярия премьера одобряет:</b>\n"
-            f"Государственная позиция {user['full_name']} отмечена. Лояльность выросла до {new_loyalty}%.",
-            parse_mode="HTML"
-        )
+        if delta != 0:
+            new_loyalty = max(0, min(100, user["loyalty"] + (delta * 3)))
+            await update_user(user["user_id"], loyalty=new_loyalty)
+            
+            if delta <= -2:
+                async with aiosqlite.connect(DB_FILE) as db:
+                    cursor = await db.execute("SELECT value FROM system_state WHERE key = 'martial_law'")
+                    row = await cursor.fetchone()
+                    if row and row[0] > now_iso:
+                        await apply_chat_mute(message, user["user_id"], 15, "Крамольные высказывания в период военного положения!")
+                        return
+                        
+                await message.reply(
+                    f"👁 <b>ШАБАК фиксирует крамолу:</b>\n"
+                    f"Субъект: {user['full_name']} (Лояльность: {new_loyalty}%). Дело передано в военный трибунал.",
+                    parse_mode="HTML"
+                )
+            elif delta >= 2:
+                await message.reply(
+                    f"📜 <b>Канцелярия премьера одобряет:</b>\n"
+                    f"Государственная позиция {user['full_name']} отмечена. Лояльность выросла до {new_loyalty}%.",
+                    parse_mode="HTML"
+                )
 
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def health_check(request):
     return web.Response(text="Bibi coalition is strong and resilient. 200 OK")
 
 async def main():
+    # 1. ПЕРВЫМ ДЕЛОМ запускаем веб-сервер, чтобы Render мгновенно увидел открытый порт
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -920,8 +928,10 @@ async def main():
     await site.start()
     print(f"--> Веб-сервер успешно привязан к 0.0.0.0:{port}", flush=True)
     
+    # 2. Инициализируем базу данных
     await init_db()
     
+    # 3. В фоне регистрируем команды, не задерживая старт поллинга
     try:
         await set_bot_commands(bot)
     except Exception as e:
@@ -937,4 +947,3 @@ if __name__ == "__main__":
         print("КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ:", flush=True)
         traceback.print_exc()
         sys.exit(1)
-        
