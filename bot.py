@@ -123,7 +123,6 @@ async def get_or_create_user(user_id: int, full_name: str):
         cols = [d[0] for d in cursor.description]
         user = dict(zip(cols, row))
         
-        # Автоматический пересчет ранга по показателям
         new_rank = 0
         for r in sorted(RANKS.keys(), reverse=True):
             if user["loyalty"] >= RANKS[r]["req_loyalty"] and user["shekels"] >= RANKS[r]["req_shekels"]:
@@ -158,7 +157,6 @@ async def get_user_bloc(bloc_id: int):
 
 def is_shabbat() -> bool:
     now = datetime.now()
-    # Пятница с 17:00 до субботы 20:00
     if (now.weekday() == 4 and now.hour >= 17) or (now.weekday() == 5 and now.hour < 20):
         return True
     return False
@@ -167,7 +165,7 @@ def is_shabbat() -> bool:
 async def set_bot_commands(bot_instance: Bot):
     commands = [
         BotCommand(command="menu", description="Оперативный пульт коалиции"),
-        BotCommand(command="dossier", description="Анкета в стиле Ириса и досье ШАБАК"),
+        BotCommand(command="dossier", description="Анкета коалиции и досье ШАБАК"),
         BotCommand(command="gesheft", description="Распил бюджета (раз в 4 часа)"),
         BotCommand(command="strike", description="Превентивный удар (рулетка)"),
         BotCommand(command="slots", description="Казино «Мифаль ха-Блеф» (/slots 50)"),
@@ -175,15 +173,15 @@ async def set_bot_commands(bot_instance: Bot):
         BotCommand(command="shop", description="Спецбуфет канцелярии (магазин)"),
         BotCommand(command="bribe", description="Занести сигары (50 ₪ за лояльность)"),
         BotCommand(command="protest", description="Орать в мегафон (Ранг 0)"),
-        BotCommand(command="shakedown", description="Реплаем: трясти ларек на 25 ₪ (Ранг 1+)"),
-        BotCommand(command="audit", description="Реплаем: налоговая проверка комиссии (Ранг 3+)"),
+        BotCommand(command="shakedown", description="Реплаем: потрясти ларек на 25 ₪ (Ранг 1+)"),
+        BotCommand(command="audit", description="Реплаем: налоговая проверка (Ранг 3+)"),
         BotCommand(command="kompromat", description="Реплаем: слить компромат Моссада (Ранг 4+)"),
         BotCommand(command="martial_law", description="Чрезвычайное положение на 20 мин (Ранг 4+)"),
         BotCommand(command="veto", description="Реплаем: право вето фаворита (Ранг 5)"),
         BotCommand(command="found_bloc", description="Основать фракцию (/found_bloc Название)"),
         BotCommand(command="bloc_sponsor", description="Внешний вектор фракции (/bloc_sponsor Умань)"),
         BotCommand(command="threat", description="Очертить красную линию (/threat тема)"),
-        BotCommand(command="pager", description="Реплаем: тревожная проверка связи"),
+        BotCommand(command="pager", description="Реплаем: проверка связи безопасности"),
         BotCommand(command="pay", description="Перевести шекели (/pay 50 @user)")
     ]
     await bot_instance.set_my_commands(commands)
@@ -236,7 +234,7 @@ async def apply_chat_mute(message: Message, user_id: int, minutes: int, reason: 
         )
         await message.reply(f"⛓ <b>ШАБАК изолировал нарушителя на {minutes} мин!</b>\nПричина: {reason}")
     except Exception:
-        await message.reply(f"⚠️ Юридический советник заблокировал изоляцию (нет прав админа у бота), но факт нарушения занесен в реестр.")
+        await message.reply("⚠️ Юридический советник заблокировал изоляцию (нет прав админа у бота), но факт нарушения занесен в реестр.")
 
 # --- КОМАНДЫ ПУЛЬТА И ДОСЬЕ ---
 @dp.message(Command("menu"))
@@ -254,7 +252,6 @@ async def cmd_dossier(message: Message):
     bloc = await get_user_bloc(user["bloc_id"])
     bloc_title = f"{bloc['name']} (Куратор: {bloc['sponsor']})" if bloc else "Внефракционный одиночка"
     
-    # Статус защиты
     now_iso = datetime.now().isoformat()
     dome_status = "Не активен"
     if user["immune_until"] and user["immune_until"] > now_iso:
@@ -472,4 +469,6 @@ async def cmd_kompromat(message: Message):
 async def cmd_martial_law(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
     if user["rank"] < 4:
-        a
+        await message.reply("Объявлять чрезвычайное положение могут только члены узкого кабинета (Ранг 4+).")
+        return
+    unti
