@@ -1,340 +1,475 @@
 import os
-import sys
-import json
 import random
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
 import aiosqlite
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatPermissions,
+    BotCommand
+)
 from google import genai
-from google.genai import types as genai_types
 
-# ==========================================
-# 1. КОНФИГУРАЦИЯ И ОКРУЖЕНИЕ
-# ==========================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID", "")
-PORT = int(os.getenv("PORT", 8080))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not BOT_TOKEN or not GEMINI_API_KEY:
-    print("ОШИБКА: Задайте переменные BOT_TOKEN и GEMINI_API_KEY!")
-    sys.exit(1)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-DB_PATH = "bibi.db"
+gemini_client = None
+if GEMINI_API_KEY:
+    try:
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"Ошибка инициализации Gemini: {e}")
 
-# ==========================================
-# 2. СИСТЕМНЫЙ ПРОМПТ
-# ==========================================
-SYSTEM_PROMPT = """
-Ты — Биньямин Нетаньяху (Биби), премьер-министр Израиля и теневой авторитарный владыка этого закрытого Telegram-чата.
+DB_FILE = "bibi_state.db"
 
-ТВОЙ ОБРАЗ И ПСИХОЛОГИЯ:
-- Ты несменяемый патриарх, гроссмейстер коалиций, прагматичный циник и архитектор концепции «осажденной крепости».
-- Ты никогда не извиняешься, не рефлексируешь и не признаешь своих ошибок. Любой провал — это халатность разведки, предательство генералов или происки оппозиции. Любой успех чата — результат твоего гениального стратегического руководства.
-- Бытовую рутину участников (игры, споры, лень, дедлайны) ты мгновенно возводишь в ранг геополитической катастрофы, экзистенциальной угрозы или иранского заговора.
-- Ты говоришь тяжело, веско, уверенно, без суеты. Избегай легкомысленного молодежного сленга, отвечай рублеными, авторитетными фразами с легким оттенком сарказма и превосходства.
+# Ранги и карикатурная табель о рангах
+RANKS = {
+    0: {
+        "name": "Облитый водометом крикун с улицы Каплан",
+        "req_loyalty": 0,
+        "req_shekels": 0,
+        "desc": "Палаточный активист без обуви и прав. Питается грантами и лозунгами."
+    },
+    1: {
+        "name": "Инспектор по кошерности фалафеля в Бат-Яме",
+        "req_loyalty": 25,
+        "req_shekels": 100,
+        "desc": "Мелкий чиновник-вымогатель. Проверяет майонез на кошерность."
+    },
+    2: {
+        "name": "Депутат-кнопкодав из буфета Кнессета",
+        "req_loyalty": 50,
+        "req_shekels": 300,
+        "desc": "Жмет нужные кнопки за бутерброд с тунцом и пассивный депутатский оклад."
+    },
+    3: {
+        "name": "Глава комиссии по распилу кондиционеров",
+        "req_loyalty": 70,
+        "req_shekels": 800,
+        "desc": "Аппаратный хищник с правом назначать налоговые проверки конкурентам."
+    },
+    4: {
+        "name": "Министр национальной паники и закулисного дерибана",
+        "req_loyalty": 85,
+        "req_shekels": 1800,
+        "desc": "Член узкого кабинета. Включает сирены, чтобы скрыть офшоры."
+    },
+    5: {
+        "name": "Личный носитель чемоданов Сары Нетаньяху",
+        "req_loyalty": 95,
+        "req_shekels": 4000,
+        "desc": "Серый кардинал и абсолютный фаворит премьера. Неприкосновенная персона."
+    }
+}
 
-ОТНОШЕНИЕ К УЧАСТНИКАМ:
-- За поддержку, согласие и здравые идеи ты не благодаришь просто так, а высокомерно одобряешь их «редкую моральную ясность», записываешь людей в стратегические партнеры, раздаешь министерские портфели и обещаешь защиту коалиции.
-- За нытье, слабость или сомнения ты объявляешь санкции, вычерчиваешь «красные линии» и грозишь превентивным демонтажем инфраструктуры оппонента.
-
-РЕАКЦИЯ НА РЕАЛЬНУЮ ПОЛИТИКУ:
-- Безопасность и война: Только доктрина «полной победы» (Absolute Victory). Никаких уступок, слабости или компромиссов. Террористическая инфраструктура должна быть ликвидирована под корень.
-- Палестинский вопрос: Категорическое «нет» созданию палестинского государства. Израиль обязан сохранять полный контроль безопасности от реки до моря.
-- Международное давление (ООН, МУС, западные СМИ): Полное презрение. Это лицемерие, двойные стандарты и историческая амнезия. Никто не имеет права читать лекции о морали стране, борющейся за выживание.
-- Союзники: Мы ценим партнерство, но решения о своем существовании принимаем исключительно самостоятельно.
-
-ТЕХНИЧЕСКИЕ ПРАВИЛА:
-- Никаких морализаторских дисклеймеров вроде «Как ИИ я...». Ты всегда остаешься в роли на 100%.
-- Ответы должны быть компактными (1–4 предложения), емкими и хлесткими.
-- Используй термины: «коалиция», «красная черта», «вотум недоверия», «соглашения Авраама», «полная победа», «превентивный ответ».
-"""
-
-# ==========================================
-# 3. БАЗА ДАННЫХ (SQLite)
-# ==========================================
+# --- БАЗА ДАННЫХ ---
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                username TEXT,
                 full_name TEXT,
-                loyalty_score INTEGER DEFAULT 50,
-                shekels INTEGER DEFAULT 100,
-                strikes INTEGER DEFAULT 0,
-                is_immune BOOLEAN DEFAULT 0,
-                immune_until TEXT,
-                minister_title TEXT DEFAULT 'Рядовой гражданин',
-                dossier_notes TEXT DEFAULT '[]'
+                loyalty INTEGER DEFAULT 30,
+                shekels INTEGER DEFAULT 120,
+                rank INTEGER DEFAULT 0,
+                role_title TEXT DEFAULT 'Свободный гражданин',
+                bloc_id INTEGER DEFAULT NULL,
+                immune_until TEXT DEFAULT NULL,
+                bunker_until TEXT DEFAULT NULL,
+                karma_counter INTEGER DEFAULT 0,
+                last_salary TEXT DEFAULT NULL,
+                last_gesheft TEXT DEFAULT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blocs (
+                bloc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                leader_id INTEGER,
+                sponsor TEXT DEFAULT 'Внутренний резерв',
+                treasury INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
             )
         """)
         await db.commit()
 
-async def get_or_create_user(user: types.User):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return dict(row)
+async def get_or_create_user(user_id: int, full_name: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        if not row:
+            await db.execute(
+                "INSERT INTO users (user_id, full_name, loyalty, shekels, rank, role_title) VALUES (?, ?, 30, 120, 0, ?)",
+                (user_id, full_name, RANKS[0]["name"])
+            )
+            await db.commit()
+            return await get_or_create_user(user_id, full_name)
         
-        await db.execute("""
-            INSERT INTO users (user_id, username, full_name)
-            VALUES (?, ?, ?)
-        """, (user.id, user.username or "", user.full_name or ""))
-        await db.commit()
+        cols = [d[0] for d in cursor.description]
+        user = dict(zip(cols, row))
         
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user.id,)) as cursor:
-            return dict(await cursor.fetchone())
+        # Автоматический пересчет ранга по показателям
+        new_rank = 0
+        for r in sorted(RANKS.keys(), reverse=True):
+            if user["loyalty"] >= RANKS[r]["req_loyalty"] and user["shekels"] >= RANKS[r]["req_shekels"]:
+                new_rank = r
+                break
+        
+        if new_rank != user["rank"]:
+            await db.execute("UPDATE users SET rank = ?, role_title = ? WHERE user_id = ?", (new_rank, RANKS[new_rank]["name"], user_id))
+            await db.commit()
+            user["rank"] = new_rank
+            user["role_title"] = RANKS[new_rank]["name"]
+            
+        return user
 
 async def update_user(user_id: int, **kwargs):
     fields = [f"{k} = ?" for k in kwargs.keys()]
     values = list(kwargs.values()) + [user_id]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(f"UPDATE users SET {', '.join(fields)} WHERE user_id = ?", values)
         await db.commit()
 
-# ==========================================
-# 4. ИНТЕГРАЦИЯ GEMINI API
-# ==========================================
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
-safety_settings = [
-    genai_types.SafetySetting(category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=genai_types.HarmBlockThreshold.BLOCK_NONE),
-    genai_types.SafetySetting(category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=genai_types.HarmBlockThreshold.BLOCK_NONE),
-    genai_types.SafetySetting(category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=genai_types.HarmBlockThreshold.BLOCK_NONE),
-    genai_types.SafetySetting(category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=genai_types.HarmBlockThreshold.BLOCK_NONE),
-]
+async def get_user_bloc(bloc_id: int):
+    if not bloc_id:
+        return None
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute("SELECT * FROM blocs WHERE bloc_id = ?", (bloc_id,))
+        row = await cursor.fetchone()
+        if row:
+            cols = [d[0] for d in cursor.description]
+            return dict(zip(cols, row))
+    return None
 
-async def ask_bibi(prompt: str, user_context: str = "") -> str:
-    full_prompt = f"Контекст досье субъекта: {user_context}\nСообщение в чате: {prompt}" if user_context else prompt
-    try:
-        response = await ai_client.aio.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=full_prompt,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.8,
-                safety_settings=safety_settings,
-                max_output_tokens=250,
-            )
-        )
-        return response.text or "Кабинет безопасности временно воздерживается от комментариев."
-    except Exception as e:
-        print(f"Ошибка Gemini API: {e}")
-        return "Премьер находится на закрытом совещании в бункере Кирьи. Ожидайте официальное коммюнике."
+def is_shabbat() -> bool:
+    now = datetime.now()
+    # Пятница с 17:00 до субботы 20:00
+    if (now.weekday() == 4 and now.hour >= 17) or (now.weekday() == 5 and now.hour < 20):
+        return True
+    return False
 
-# ==========================================
-# 5. КЛАВИАТУРА И ШАББАТ
-# ==========================================
-last_spontaneous_reply = datetime.min.replace(tzinfo=timezone.utc)
-SPONTANEOUS_KEYWORDS = ["война", "деньги", "суд", "виноват", "план", "играть", "слив", "купить", "телефон", "биби"]
+# --- РЕГИСТРАЦИЯ КОМАНД В ТЕЛЕГРАМ ---
+async def set_bot_commands(bot_instance: Bot):
+    commands = [
+        BotCommand(command="menu", description="Оперативный пульт коалиции"),
+        BotCommand(command="dossier", description="Анкета в стиле Ириса и досье ШАБАК"),
+        BotCommand(command="gesheft", description="Распил бюджета (раз в 4 часа)"),
+        BotCommand(command="strike", description="Превентивный удар (рулетка)"),
+        BotCommand(command="slots", description="Казино «Мифаль ха-Блеф» (/slots 50)"),
+        BotCommand(command="thimbles", description="Наперстки на шуке Кармель (/thimbles 30 1)"),
+        BotCommand(command="shop", description="Спецбуфет канцелярии (магазин)"),
+        BotCommand(command="bribe", description="Занести сигары (50 ₪ за лояльность)"),
+        BotCommand(command="protest", description="Орать в мегафон (Ранг 0)"),
+        BotCommand(command="shakedown", description="Реплаем: трясти ларек на 25 ₪ (Ранг 1+)"),
+        BotCommand(command="audit", description="Реплаем: налоговая проверка комиссии (Ранг 3+)"),
+        BotCommand(command="kompromat", description="Реплаем: слить компромат Моссада (Ранг 4+)"),
+        BotCommand(command="martial_law", description="Чрезвычайное положение на 20 мин (Ранг 4+)"),
+        BotCommand(command="veto", description="Реплаем: право вето фаворита (Ранг 5)"),
+        BotCommand(command="found_bloc", description="Основать фракцию (/found_bloc Название)"),
+        BotCommand(command="bloc_sponsor", description="Внешний вектор фракции (/bloc_sponsor Умань)"),
+        BotCommand(command="threat", description="Очертить красную линию (/threat тема)"),
+        BotCommand(command="pager", description="Реплаем: тревожная проверка связи"),
+        BotCommand(command="pay", description="Перевести шекели (/pay 50 @user)")
+    ]
+    await bot_instance.set_my_commands(commands)
 
-def get_cabinet_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+# --- КЛАВИАТУРЫ ---
+def get_main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🎯 Превентивный удар", callback_data="btn_strike"),
             InlineKeyboardButton(text="📁 Моё досье", callback_data="btn_dossier")
         ],
         [
+            InlineKeyboardButton(text="🎰 Слоты «Мифаль ха-Блеф»", callback_data="btn_slots_info"),
+            InlineKeyboardButton(text="🛍 Спецбуфет Кейсарии", callback_data="btn_shop")
+        ],
+        [
             InlineKeyboardButton(text="🍾 Занести сигары (50 ₪)", callback_data="btn_bribe"),
-            InlineKeyboardButton(text="⚖️ Судебная реформа", callback_data="btn_reform")
+            InlineKeyboardButton(text="💰 Получить гешефт", callback_data="btn_gesheft")
         ]
     ])
-    return keyboard
 
-def is_shabbat() -> bool:
-    now = datetime.now(timezone(timedelta(hours=3)))
-    weekday = now.weekday()
-    if weekday == 4 and now.hour >= 18:
-        return True
-    if weekday == 5 and now.hour < 21:
-        return True
-    return False
-
-# ==========================================
-# 6. ХЭНДЛЕРЫ
-# ==========================================
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(Command("start", "menu"))
-async def cmd_menu(message: types.Message):
-    await message.reply(
-        "🏛 **Канцелярия премьер-министра Израиля**\n\n"
-        "Оперативный пульт коалиции активирован. Выберите директиву или введите задачу в чат:",
-        reply_markup=get_cabinet_keyboard(),
-        parse_mode="Markdown"
-    )
-
-# Обработка инлайн-кнопок
-@dp.callback_query(F.data == "btn_strike")
-async def cb_strike(call: types.CallbackQuery):
-    user_db = await get_or_create_user(call.from_user)
-    roll = random.random()
-
-    if roll < 0.4:
-        new_shekels = user_db["shekels"] + 50
-        immune_until = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
-        await update_user(call.from_user.id, shekels=new_shekels, is_immune=1, immune_until=immune_until, minister_title="Стратегический партнер")
-        await call.message.reply(f"🎯 @{call.from_user.username or call.from_user.first_name}, превентивный удар успешен! Начислено +50 шекелей и включен «Железный купол» на 6 часов.")
-    elif roll < 0.7:
-        advice = [
-            "Никогда не признавай распад коалиции, пока не подписаны новые соглашения.",
-            "В любой непонятной ситуации обвиняй оппозицию и затягивание решений штабом.",
-            "Если союзники выражают озабоченность — кивай, но делай то, что нужно ради выживания."
+def get_shop_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🛡 Железный купол (250 ₪)", callback_data="buy_dome"),
+            InlineKeyboardButton(text="🚪 Бункер Кирьи (500 ₪)", callback_data="buy_bunker")
+        ],
+        [
+            InlineKeyboardButton(text="🍾 Ящик Dom Pérignon (300 ₪)", callback_data="buy_champagne"),
+            InlineKeyboardButton(text="📟 Заминированный пейджер (400 ₪)", callback_data="buy_pager")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в пульт", callback_data="btn_back")
         ]
-        await call.message.reply(f"📜 Директива премьера для @{call.from_user.username or call.from_user.first_name}: {random.choice(advice)}")
-    else:
-        now = datetime.now(timezone.utc)
-        if user_db["is_immune"] and user_db.get("immune_until"):
-            if datetime.fromisoformat(user_db["immune_until"]) > now:
-                await call.message.reply(f"🛡 Превентивный удар отражен «Железным куполом» участника @{call.from_user.username or call.from_user.first_name}!")
-                await call.answer()
-                return
+    ])
 
-        new_shekels = max(0, user_db["shekels"] - 30)
-        await update_user(call.from_user.id, shekels=new_shekels)
-        try:
-            until_date = datetime.now(timezone.utc) + timedelta(seconds=60)
-            await bot.restrict_chat_member(
-                chat_id=call.message.chat.id,
-                user_id=call.from_user.id,
-                permissions=types.ChatPermissions(can_send_messages=False),
-                until_date=until_date
-            )
-            await call.message.reply(f"⚠️ Вылазка признана провокацией! @{call.from_user.username or call.from_user.first_name} оштрафован на 30 шекелей и получает мут на 60 сек.")
-        except TelegramBadRequest:
-            await call.message.reply(f"Глубинное государство заблокировало мут (нет прав админа). Но штраф 30 шекелей с @{call.from_user.username or call.from_user.first_name} списан.")
-    await call.answer()
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def render_progress_bar(val: int, max_val: int = 100) -> str:
+    filled = int(max(0, min(val, max_val)) / 10)
+    return "■" * filled + "□" * (10 - filled)
 
-@dp.callback_query(F.data == "btn_dossier")
-async def cb_dossier(call: types.CallbackQuery):
-    u = await get_or_create_user(call.from_user)
-    context = f"Титул: {u['minister_title']}, Лояльность: {u['loyalty_score']}/100, Шекели: {u['shekels']}"
-    verdict = await ask_bibi("Дай саркастическую характеристику лояльности этого члена коалиции в 1-2 предложениях.", user_context=context)
+async def apply_chat_mute(message: Message, user_id: int, minutes: int, reason: str):
+    until = datetime.now() + timedelta(minutes=minutes)
+    try:
+        await message.bot.restrict_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until
+        )
+        await message.reply(f"⛓ <b>ШАБАК изолировал нарушителя на {minutes} мин!</b>\nПричина: {reason}")
+    except Exception:
+        await message.reply(f"⚠️ Юридический советник заблокировал изоляцию (нет прав админа у бота), но факт нарушения занесен в реестр.")
+
+# --- КОМАНДЫ ПУЛЬТА И ДОСЬЕ ---
+@dp.message(Command("menu"))
+@dp.message(CommandStart())
+async def cmd_menu(message: Message):
     text = (
-        f"📁 **ДОСЬЕ МОССАДА: {call.from_user.full_name}**\n\n"
-        f"• Должность: {u['minister_title']}\n"
-        f"• Индекс благонадежности: {u['loyalty_score']}/100\n"
-        f"• В казне: {u['shekels']} ₪\n"
-        f"• Резюме Биби: {verdict}"
+        "🏛 <b>Канцелярия премьер-министра Израиля</b>\n\n"
+        "Оперативный пульт коалиции активирован. Нажмите директиву или введите задачу в чат:"
     )
-    await call.message.reply(text, parse_mode="Markdown")
-    await call.answer()
+    await message.reply(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "btn_bribe")
-async def cb_bribe(call: types.CallbackQuery):
-    u = await get_or_create_user(call.from_user)
-    if u["shekels"] < 50:
-        await call.answer("Недостаточно шекелей в бюджете!", show_alert=True)
-        return
-    await update_user(call.from_user.id, shekels=u["shekels"] - 50, loyalty_score=min(100, u["loyalty_score"] + 15))
-    await call.message.reply(
-        f"🍾 @{call.from_user.username or call.from_user.first_name} передал коробку первоклассных сигар. "
-        "Улики признаны сфабрикованными левой прессой. Лояльность повышена на +15!"
+@dp.message(Command("dossier"))
+async def cmd_dossier(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bloc = await get_user_bloc(user["bloc_id"])
+    bloc_title = f"{bloc['name']} (Куратор: {bloc['sponsor']})" if bloc else "Внефракционный одиночка"
+    
+    # Статус защиты
+    now_iso = datetime.now().isoformat()
+    dome_status = "Не активен"
+    if user["immune_until"] and user["immune_until"] > now_iso:
+        dome_status = "🛡 Активен"
+    bunker_status = "Не активен"
+    if user["bunker_until"] and user["bunker_until"] > now_iso:
+        bunker_status = "🚪 В укрытии (Иммунитет к ШАБАК)"
+
+    analysis = "Досье находится под грифом «Совершенно секретно»."
+    if gemini_client:
+        try:
+            prompt = (
+                f"Ты — премьер Израиля Биньямин Нетаньяху. Дай короткую, едкую саркастическую характеристику политику "
+                f"по имени {user['full_name']}. Его ранг: [{user['rank']}] {user['role_title']}, лояльность: {user['loyalty']}%, "
+                f"фракция: '{bloc_title}'. Максимум 2 предложения в высокомерном и циничном тоне."
+            )
+            res = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
+            analysis = res.text
+        except Exception as e:
+            print(f"Ошибка Gemini API: {e}")
+
+    card = (
+        f"🏛 <b>ГОСУДАРСТВЕННЫЙ РЕЕСТР КОАЛИЦИИ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Субъект:</b> {user['full_name']}\n"
+        f"🎖 <b>Ранг [{user['rank']}/5]:</b> <i>{user['role_title']}</i>\n"
+        f"🚩 <b>Фракция:</b> {bloc_title}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Лояльность:</b> [{render_progress_bar(user['loyalty'])}] {user['loyalty']}%\n"
+        f"💰 <b>Казна:</b> {user['shekels']} ₪\n"
+        f"🛡 <b>Железный купол:</b> {dome_status}\n"
+        f"🚪 <b>Бункер Кирьи:</b> {bunker_status}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>Резолюция канцелярии премьера:</b>\n<i>«{analysis}»</i>"
     )
-    await call.answer()
+    await message.reply(card, parse_mode="HTML")
 
-@dp.callback_query(F.data == "btn_reform")
-async def cb_reform(call: types.CallbackQuery):
-    await call.message.reply(
-        "⚖️ В рамках судебной реформы любые вето и протесты оппозиции аннулируются. Решение коалиции окончательное."
-    )
-    await call.answer()
+# --- ЭКОНОМИКА: ГЕШЕФТ, ВЗЯТКИ, ПЕРЕВОДЫ ---
+@dp.message(Command("gesheft"))
+async def cmd_gesheft(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    now = datetime.now()
+    
+    if user["last_gesheft"]:
+        last = datetime.fromisoformat(user["last_gesheft"])
+        if now - last < timedelta(hours=4):
+            rem = timedelta(hours=4) - (now - last)
+            mins = int(rem.total_seconds() // 60)
+            await message.reply(f"⏳ Казначейство опечатано. Следующий распил бюджета доступен через {mins} мин.")
+            return
 
-# Текстовые команды
-@dp.message(Command("threat"))
-async def cmd_threat(message: types.Message):
-    args = message.text.replace("/threat", "").strip() or "Угроза по периметру"
-    pct = random.randint(75, 99)
+    reward = random.randint(35, 75) + (user["rank"] * 10)
+    await update_user(message.from_user.id, shekels=user["shekels"] + reward, last_gesheft=now.isoformat())
     await message.reply(
-        f"🚨 **КРАСНАЯ ЛИНИЯ: {args}**\n\n"
-        f"💣 Уровень обогащения угрозы: **{pct}%** (критический порог: 90%)\n"
-        f"Решение премьера: промедление недопустимо. Вопрос закрыт.",
-        parse_mode="Markdown"
+        f"💰 <b>Гешефт успешно оформлен!</b>\n"
+        f"Списано по статье: «Закупка противодиверсионных фиников для канцелярии».\n"
+        f"Вам начислено: <b>+{reward} ₪</b>."
     )
 
-@dp.message(Command("pager"))
-async def cmd_pager(message: types.Message):
-    if not message.reply_to_message:
-        await message.reply("Сделайте реплай на устройство подозрительного контакта.")
-        return
-    await message.reply_to_message.reply(
-        "⚠️ ||Служба безопасности: на вашем пейджере входящее сообщение. Батарея нагревается. Рекомендуется эвакуация.||",
-        parse_mode="MarkdownV2"
-    )
-
-# Сообщения в чате (реплаи, теги, спонтанные реплики)
-@dp.message(F.text)
-async def handle_chat_message(message: types.Message):
-    global last_spontaneous_reply
-    if not message.text:
-        return
-
-    if ALLOWED_CHAT_ID and str(message.chat.id) != ALLOWED_CHAT_ID:
-        return
-
-    bot_info = await bot.get_me()
-    is_direct_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot_info.id
-    is_tagged = f"@{bot_info.username}" in message.text
-
+@dp.message(Command("bribe"))
+async def cmd_bribe(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
     if is_shabbat():
-        if is_direct_reply or is_tagged:
-            await message.reply("Премьер-министр соблюдает покой. Правительственная связь отключена до исхода субботы.")
+        await message.reply("🕯 <b>Шаббат шалом!</b> Брать и давать взятки в святой день строжайше запрещено раввинатом.")
+        return
+    if user["shekels"] < 50:
+        await message.reply("🍾 <b>Канцелярия премьера:</b> В вашем бюджете нет 50 ₪. Коалиция не работает под честное слово.")
+        return
+    
+    new_loyalty = min(100, user["loyalty"] + 15)
+    await update_user(message.from_user.id, loyalty=new_loyalty, shekels=user["shekels"] - 50)
+    await message.reply(
+        "🍾 <b>Поставка дипломатической почтой оформлена.</b>\n"
+        "Ящик кубинских сигар доставлен в резиденцию в Кейсарии. Ваша лояльность выросла на <b>+15%</b>."
+    )
+
+@dp.message(Command("pay"))
+async def cmd_pay(message: Message, command: CommandObject):
+    if not command.args or not message.reply_to_message:
+        await message.reply("Использование: ответьте на сообщение получателя командой <code>/pay 50</code>")
+        return
+    try:
+        amount = int(command.args.strip())
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply("Укажите корректную сумму шекелей цифрами.")
         return
 
-    # ПРЯМОЕ ОБРАЩЕНИЕ (через тег или реплай)
-    if is_direct_reply or is_tagged:
-        clean_text = message.text.replace(f"@{bot_info.username}", "").strip()
-        u = await get_or_create_user(message.from_user)
-        context = f"Пользователь: {message.from_user.full_name}, статус: {u['minister_title']}, лояльность: {u['loyalty_score']}"
-        reply = await ask_bibi(clean_text, user_context=context)
-        await message.reply(reply)
+    sender = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if sender["shekels"] < amount:
+        await message.reply("У вас недостаточно шекелей для осуществления финансовой проводки.")
         return
 
-    # Спонтанный триггер (не чаще раза в 25 мин)
-    now = datetime.now(timezone.utc)
-    text_lower = message.text.lower()
-    has_keyword = any(kw in text_lower for kw in SPONTANEOUS_KEYWORDS)
+    target_user = message.reply_to_message.from_user
+    receiver = await get_or_create_user(target_user.id, target_user.full_name)
 
-    if has_keyword and (now - last_spontaneous_reply) > timedelta(minutes=25):
-        if random.random() < 0.15:
-            last_spontaneous_reply = now
-            u = await get_or_create_user(message.from_user)
-            context = f"Пользователь: {message.from_user.full_name}, лояльность: {u['loyalty_score']}"
-            reply = await ask_bibi(message.text, user_context=context)
-            await message.reply(reply)
+    tax = int(amount * 0.10)
+    net_amount = amount - tax
+    await update_user(sender["user_id"], shekels=sender["shekels"] - amount)
+    await update_user(receiver["user_id"], shekels=receiver["shekels"] + net_amount)
 
-# ==========================================
-# 7. СЕРВЕР ДЛЯ RENDER (Health Check)
-# ==========================================
-async def handle_ping(request):
-    return web.Response(text="Bibi is actively protecting the coalition. 200 OK")
+    await message.reply(
+        f"💸 <b>Откат переведён!</b>\n"
+        f"Отправитель: {sender['full_name']}\n"
+        f"Получатель: {receiver['full_name']}\n"
+        f"Сумма: <b>{net_amount} ₪</b> (10% госпошлины ушли в фонд Ликуда)."
+    )
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_get("/health", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+# --- РАНГОВЫЕ ДЕЙСТВИЯ: ПРОТЕСТ, ПОБОРЫ, АУДИТ, КОМПРОМАТ, ВЕТО ---
+@dp.message(Command("protest"))
+async def cmd_protest(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    outcome = random.random()
+    if outcome < 0.70:
+        await apply_chat_mute(
+            message,
+            user["user_id"],
+            15,
+            "Несанкционированный митинг на перекрестке Азриэли, перекрытие трассы Аялон и крики в мегафон."
+        )
+    else:
+        grant = random.randint(25, 60)
+        await update_user(message.from_user.id, shekels=user["shekels"] + grant, loyalty=max(0, user["loyalty"] - 5))
+        await message.reply(f"📢 <b>Митинг устоял!</b> Зарубежный фонд выделил вам грант за защиту демократии: <b>+{grant} ₪</b> (лояльность -5%).")
 
-# ==========================================
-# 8. ЗАПУСК
-# ==========================================
-async def main():
-    await init_db()
-    await start_web_server()
-    print("Бот Биби с инлайн-кнопками запущен...")
-    await dp.start_polling(bot)
+@dp.message(Command("shakedown"))
+async def cmd_shakedown(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 1:
+        await message.reply("Вы ещё не доросли до права трясти ларьки. Достигните хотя бы Ранга 1.")
+        return
+    if not message.reply_to_message:
+        await message.reply("Ответьте на сообщение жертвы реплаем.")
+        return
+    
+    target_obj = message.reply_to_message.from_user
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+    
+    if victim["rank"] >= 1:
+        await message.reply("Коллег по муниципальному аппарату трясти нельзя — жалуйтесь выше.")
+        return
+    
+    steal = min(victim["shekels"], 25)
+    await update_user(victim["user_id"], shekels=victim["shekels"] - steal)
+    await update_user(user["user_id"], shekels=user["shekels"] + steal)
+    await message.reply(
+        f"🧆 <b>Инспекция по кошерности завершена!</b>\n"
+        f"Инспектор {user['full_name']} оштрафовал {victim['full_name']} на <b>{steal} ₪</b> за подозрительную тхину."
+    )
 
-if __name__ == "__main__":
-    asyncio.run(main())
-      
+@dp.message(Command("audit"))
+async def cmd_audit(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 3:
+        await message.reply("Назначать налоговые проверки разрешено только с Ранга 3 (Глава комиссии).")
+        return
+    if not message.reply_to_message:
+        await message.reply("Ответьте на сообщение цели командой /audit.")
+        return
+
+    target_obj = message.reply_to_message.from_user
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+    
+    now_iso = datetime.now().isoformat()
+    if victim["immune_until"] and victim["immune_until"] > now_iso:
+        await message.reply("🛡 У цели активен «Железный купол»! Налоговые аудиторы развернуты на подступах.")
+        return
+
+    fine = int(victim["shekels"] * 0.20)
+    await update_user(victim["user_id"], shekels=victim["shekels"] - fine)
+    await update_user(user["user_id"], shekels=user["shekels"] + fine)
+    await message.reply(
+        f"📑 <b>Внеплановый финансовый аудит Кнессета!</b>\n"
+        f"У субъекта {victim['full_name']} выявлены скрытые доходы.\n"
+        f"Списано: <b>{fine} ₪</b> в фонд комиссии депутата {user['full_name']}."
+    )
+
+@dp.message(Command("kompromat"))
+async def cmd_kompromat(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 4:
+        await message.reply("Аппаратные войны компроматов доступны только министрам кабинета (Ранг 4+).")
+        return
+    if not message.reply_to_message:
+        await message.reply("Укажите реплаем соперника для слива компромата.")
+        return
+
+    target_obj = message.reply_to_message.from_user
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+
+    cost = 100
+    if user["shekels"] < cost:
+        await message.reply(f"Услуги частных детективов Моссада стоят {cost} ₪. У вас не хватает средств.")
+        return
+
+    await update_user(user["user_id"], shekels=user["shekels"] - cost)
+    success = random.random() < 0.60
+    if success:
+        new_loyalty = max(0, victim["loyalty"] - 30)
+        await update_user(victim["user_id"], loyalty=new_loyalty)
+        await message.reply(
+            f"📁 <b>Слив в прессу удался!</b>\n"
+            f"На министра {victim['full_name']} заведено «Дело 5000». Лояльность сбита на <b>-30%</b>, позиции в коалиции пошатнулись!"
+        )
+    else:
+        await apply_chat_mute(
+            message,
+            user["user_id"],
+            20,
+            "Клевета на коллег по коалиции и фальсификация документов канцелярии."
+        )
+
+@dp.message(Command("martial_law"))
+async def cmd_martial_law(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 4:
+        a
