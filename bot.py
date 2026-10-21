@@ -1,4 +1,6 @@
 import os
+import sys
+import traceback
 import random
 import asyncio
 from datetime import datetime, timedelta
@@ -17,8 +19,17 @@ from aiogram.types import (
 )
 from google import genai
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Отключаем буферизацию логов, чтобы Render сразу показывал каждую строчку
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+print("--> Инициализация скрипта bot.py...", flush=True)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+if not BOT_TOKEN:
+    print("КРИТИЧЕСКАЯ ОШИБКА: Переменная BOT_TOKEN пуста или не задана в Render!", flush=True)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -27,12 +38,13 @@ gemini_client = None
 if GEMINI_API_KEY:
     try:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        print("--> Клиент Gemini успешно подключен.", flush=True)
     except Exception as e:
-        print(f"Ошибка инициализации Gemini: {e}")
+        print(f"Ошибка инициализации Gemini: {e}", flush=True)
 
-DB_FILE = "bibi_state.db"
+# Новое имя файла БД, чтобы не конфликтовать со старой таблицей без колонок
+DB_FILE = "bibi_rpg.db"
 
-# Ранги и карикатурная табель о рангах
 RANKS = {
     0: {
         "name": "Облитый водометом крикун с улицы Каплан",
@@ -107,6 +119,7 @@ async def init_db():
             )
         """)
         await db.commit()
+    print("--> База данных SQLite готова.", flush=True)
 
 async def get_or_create_user(user_id: int, full_name: str):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -185,6 +198,7 @@ async def set_bot_commands(bot_instance: Bot):
         BotCommand(command="pay", description="Перевести шекели (/pay 50 @user)")
     ]
     await bot_instance.set_my_commands(commands)
+    print("--> Команды меню успешно зарегистрированы в Telegram.", flush=True)
 
 # --- КЛАВИАТУРЫ ---
 def get_main_keyboard():
@@ -232,7 +246,7 @@ async def apply_chat_mute(message: Message, user_id: int, minutes: int, reason: 
             permissions=ChatPermissions(can_send_messages=False),
             until_date=until
         )
-        await message.reply(f"⛓ <b>ШАБАК изолировал нарушителя на {minutes} мин!</b>\nПричина: {reason}")
+        await message.reply(f"⛓ <b>ШАБАК изолировал нарушителя на {minutes} мин!</b>\nПричина: {reason}", parse_mode="HTML")
     except Exception:
         await message.reply("⚠️ Юридический советник заблокировал изоляцию (нет прав админа у бота), но факт нарушения занесен в реестр.")
 
@@ -271,7 +285,7 @@ async def cmd_dossier(message: Message):
             res = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
             analysis = res.text
         except Exception as e:
-            print(f"Ошибка Gemini API: {e}")
+            print(f"Ошибка Gemini API: {e}", flush=True)
 
     card = (
         f"🏛 <b>ГОСУДАРСТВЕННЫЙ РЕЕСТР КОАЛИЦИИ</b>\n"
@@ -308,30 +322,32 @@ async def cmd_gesheft(message: Message):
     await message.reply(
         f"💰 <b>Гешефт успешно оформлен!</b>\n"
         f"Списано по статье: «Закупка противодиверсионных фиников для канцелярии».\n"
-        f"Вам начислено: <b>+{reward} ₪</b>."
+        f"Вам начислено: <b>+{reward} ₪</b>.",
+        parse_mode="HTML"
     )
 
 @dp.message(Command("bribe"))
 async def cmd_bribe(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
     if is_shabbat():
-        await message.reply("🕯 <b>Шаббат шалом!</b> Брать и давать взятки в святой день строжайше запрещено раввинатом.")
+        await message.reply("🕯 <b>Шаббат шалом!</b> Брать и давать взятки в святой день строжайше запрещено раввинатом.", parse_mode="HTML")
         return
     if user["shekels"] < 50:
-        await message.reply("🍾 <b>Канцелярия премьера:</b> В вашем бюджете нет 50 ₪. Коалиция не работает под честное слово.")
+        await message.reply("🍾 <b>Канцелярия премьера:</b> В вашем бюджете нет 50 ₪. Коалиция не работает под честное слово.", parse_mode="HTML")
         return
     
     new_loyalty = min(100, user["loyalty"] + 15)
     await update_user(message.from_user.id, loyalty=new_loyalty, shekels=user["shekels"] - 50)
     await message.reply(
         "🍾 <b>Поставка дипломатической почтой оформлена.</b>\n"
-        "Ящик кубинских сигар доставлен в резиденцию в Кейсарии. Ваша лояльность выросла на <b>+15%</b>."
+        "Ящик кубинских сигар доставлен в резиденцию в Кейсарии. Ваша лояльность выросла на <b>+15%</b>.",
+        parse_mode="HTML"
     )
 
 @dp.message(Command("pay"))
 async def cmd_pay(message: Message, command: CommandObject):
     if not command.args or not message.reply_to_message:
-        await message.reply("Использование: ответьте на сообщение получателя командой <code>/pay 50</code>")
+        await message.reply("Использование: ответьте на сообщение получателя командой <code>/pay 50</code>", parse_mode="HTML")
         return
     try:
         amount = int(command.args.strip())
@@ -358,7 +374,8 @@ async def cmd_pay(message: Message, command: CommandObject):
         f"💸 <b>Откат переведён!</b>\n"
         f"Отправитель: {sender['full_name']}\n"
         f"Получатель: {receiver['full_name']}\n"
-        f"Сумма: <b>{net_amount} ₪</b> (10% госпошлины ушли в фонд Ликуда)."
+        f"Сумма: <b>{net_amount} ₪</b> (10% госпошлины ушли в фонд Ликуда).",
+        parse_mode="HTML"
     )
 
 # --- РАНГОВЫЕ ДЕЙСТВИЯ: ПРОТЕСТ, ПОБОРЫ, АУДИТ, КОМПРОМАТ, ВЕТО ---
@@ -376,7 +393,7 @@ async def cmd_protest(message: Message):
     else:
         grant = random.randint(25, 60)
         await update_user(message.from_user.id, shekels=user["shekels"] + grant, loyalty=max(0, user["loyalty"] - 5))
-        await message.reply(f"📢 <b>Митинг устоял!</b> Зарубежный фонд выделил вам грант за защиту демократии: <b>+{grant} ₪</b> (лояльность -5%).")
+        await message.reply(f"📢 <b>Митинг устоял!</b> Зарубежный фонд выделил вам грант за защиту демократии: <b>+{grant} ₪</b> (лояльность -5%).", parse_mode="HTML")
 
 @dp.message(Command("shakedown"))
 async def cmd_shakedown(message: Message):
@@ -400,7 +417,8 @@ async def cmd_shakedown(message: Message):
     await update_user(user["user_id"], shekels=user["shekels"] + steal)
     await message.reply(
         f"🧆 <b>Инспекция по кошерности завершена!</b>\n"
-        f"Инспектор {user['full_name']} оштрафовал {victim['full_name']} на <b>{steal} ₪</b> за подозрительную тхину."
+        f"Инспектор {user['full_name']} оштрафовал {victim['full_name']} на <b>{steal} ₪</b> за подозрительную тхину.",
+        parse_mode="HTML"
     )
 
 @dp.message(Command("audit"))
@@ -427,7 +445,8 @@ async def cmd_audit(message: Message):
     await message.reply(
         f"📑 <b>Внеплановый финансовый аудит Кнессета!</b>\n"
         f"У субъекта {victim['full_name']} выявлены скрытые доходы.\n"
-        f"Списано: <b>{fine} ₪</b> в фонд комиссии депутата {user['full_name']}."
+        f"Списано: <b>{fine} ₪</b> в фонд комиссии депутата {user['full_name']}.",
+        parse_mode="HTML"
     )
 
 @dp.message(Command("kompromat"))
@@ -450,25 +469,4 @@ async def cmd_kompromat(message: Message):
 
     await update_user(user["user_id"], shekels=user["shekels"] - cost)
     success = random.random() < 0.60
-    if success:
-        new_loyalty = max(0, victim["loyalty"] - 30)
-        await update_user(victim["user_id"], loyalty=new_loyalty)
-        await message.reply(
-            f"📁 <b>Слив в прессу удался!</b>\n"
-            f"На министра {victim['full_name']} заведено «Дело 5000». Лояльность сбита на <b>-30%</b>, позиции в коалиции пошатнулись!"
-        )
-    else:
-        await apply_chat_mute(
-            message,
-            user["user_id"],
-            20,
-            "Клевета на коллег по коалиции и фальсификация документов канцелярии."
-        )
-
-@dp.message(Command("martial_law"))
-async def cmd_martial_law(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
-    if user["rank"] < 4:
-        await message.reply("Объявлять чрезвычайное положение могут только члены узкого кабинета (Ранг 4+).")
-        return
-    unti
+    if 
