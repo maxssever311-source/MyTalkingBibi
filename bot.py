@@ -8,7 +8,7 @@ from aiohttp import web
 import aiosqlite
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -19,7 +19,6 @@ from aiogram.types import (
 )
 from google import genai
 
-# Отключаем буферизацию логов, чтобы Render сразу показывал каждую строчку
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -42,7 +41,6 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"Ошибка инициализации Gemini: {e}", flush=True)
 
-# Новое имя файла БД, чтобы не конфликтовать со старой таблицей без колонок
 DB_FILE = "bibi_rpg.db"
 
 RANKS = {
@@ -90,6 +88,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+                username TEXT DEFAULT NULL,
                 full_name TEXT,
                 loyalty INTEGER DEFAULT 30,
                 shekels INTEGER DEFAULT 120,
@@ -103,6 +102,12 @@ async def init_db():
                 last_gesheft TEXT DEFAULT NULL
             )
         """)
+        # Безопасное добавление колонки username, если база уже была создана ранее
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT NULL")
+        except Exception:
+            pass
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS blocs (
                 bloc_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,21 +126,29 @@ async def init_db():
         await db.commit()
     print("--> База данных SQLite готова.", flush=True)
 
-async def get_or_create_user(user_id: int, full_name: str):
+async def get_or_create_user(user_id: int, full_name: str, username: str = None):
+    clean_uname = username.lower().lstrip("@") if username else None
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = await cursor.fetchone()
         if not row:
             await db.execute(
-                "INSERT INTO users (user_id, full_name, loyalty, shekels, rank, role_title) VALUES (?, ?, 30, 120, 0, ?)",
-                (user_id, full_name, RANKS[0]["name"])
+                "INSERT INTO users (user_id, username, full_name, loyalty, shekels, rank, role_title) VALUES (?, ?, ?, 30, 120, 0, ?)",
+                (user_id, clean_uname, full_name, RANKS[0]["name"])
             )
             await db.commit()
-            return await get_or_create_user(user_id, full_name)
+            return await get_or_create_user(user_id, full_name, username)
         
         cols = [d[0] for d in cursor.description]
         user = dict(zip(cols, row))
         
+        # Обновляем имя и username при активности
+        if clean_uname and user.get("username") != clean_uname:
+            await db.execute("UPDATE users SET username = ?, full_name = ? WHERE user_id = ?", (clean_uname, full_name, user_id))
+            await db.commit()
+            user["username"] = clean_uname
+            user["full_name"] = full_name
+
         new_rank = 0
         for r in sorted(RANKS.keys(), reverse=True):
             if user["loyalty"] >= RANKS[r]["req_loyalty"] and user["shekels"] >= RANKS[r]["req_shekels"]:
@@ -149,6 +162,17 @@ async def get_or_create_user(user_id: int, full_name: str):
             user["role_title"] = RANKS[new_rank]["name"]
             
         return user
+
+async def get_user_by_username(username: str):
+    clean_uname = username.lower().lstrip("@").strip()
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute("SELECT * FROM users WHERE username = ?", (clean_uname,))
+        row = await cursor.fetchone()
+        if row:
+            cols = [d[0] for d in cursor.description]
+            user = dict(zip(cols, row))
+            return await get_or_create_user(user["user_id"], user["full_name"], user.get("username"))
+    return None
 
 async def update_user(user_id: int, **kwargs):
     fields = [f"{k} = ?" for k in kwargs.keys()]
@@ -177,25 +201,25 @@ def is_shabbat() -> bool:
 # --- РЕГИСТРАЦИЯ КОМАНД В ТЕЛЕГРАМ ---
 async def set_bot_commands(bot_instance: Bot):
     commands = [
-        BotCommand(command="menu", description="Оперативный пульт коалиции"),
-        BotCommand(command="dossier", description="Анкета коалиции и досье ШАБАК"),
-        BotCommand(command="gesheft", description="Распил бюджета (раз в 4 часа)"),
-        BotCommand(command="strike", description="Превентивный удар (рулетка)"),
-        BotCommand(command="slots", description="Казино «Мифаль ха-Блеф» (/slots 50)"),
-        BotCommand(command="thimbles", description="Наперстки на шуке Кармель (/thimbles 30 1)"),
-        BotCommand(command="shop", description="Спецбуфет канцелярии (магазин)"),
-        BotCommand(command="bribe", description="Занести сигары (50 ₪ за лояльность)"),
-        BotCommand(command="protest", description="Орать в мегафон (Ранг 0)"),
-        BotCommand(command="shakedown", description="Реплаем: потрясти ларек на 25 ₪ (Ранг 1+)"),
-        BotCommand(command="audit", description="Реплаем: налоговая проверка (Ранг 3+)"),
-        BotCommand(command="kompromat", description="Реплаем: слить компромат Моссада (Ранг 4+)"),
-        BotCommand(command="martial_law", description="Чрезвычайное положение на 20 мин (Ранг 4+)"),
-        BotCommand(command="veto", description="Реплаем: право вето фаворита (Ранг 5)"),
+        BotCommand(command="menu", description="Оперативный пульт коалиции (или слово «Пульт»)"),
+        BotCommand(command="dossier", description="Анкета коалиции (или слово «Досье»)"),
+        BotCommand(command="gesheft", description="Распил бюджета (или слово «Гешефт»)"),
+        BotCommand(command="strike", description="Превентивный удар (или слово «Удар»)"),
+        BotCommand(command="slots", description="Слоты (/slots 50 или «Слоты 50»)"),
+        BotCommand(command="thimbles", description="Наперстки (/thimbles 30 1 или «Наперстки 30 1»)"),
+        BotCommand(command="shop", description="Спецбуфет канцелярии (или слово «Буфет»)"),
+        BotCommand(command="bribe", description="Занести сигары (или слово «Сигары»)"),
+        BotCommand(command="protest", description="Орать в мегафон (или слово «Протест»)"),
+        BotCommand(command="shakedown", description="Реплаем: потрясти ларек (или «Ларек»)"),
+        BotCommand(command="audit", description="Реплаем: налоговая проверка (или «Аудит»)"),
+        BotCommand(command="kompromat", description="Реплаем: слить компромат (или «Компромат»)"),
+        BotCommand(command="martial_law", description="Военное положение на 20 мин (Ранг 4+)"),
+        BotCommand(command="veto", description="Реплаем: право вето (или слово «Вето»)"),
         BotCommand(command="found_bloc", description="Основать фракцию (/found_bloc Название)"),
-        BotCommand(command="bloc_sponsor", description="Внешний вектор фракции (/bloc_sponsor Умань)"),
+        BotCommand(command="bloc_sponsor", description="Внешний вектор (/bloc_sponsor Умань)"),
         BotCommand(command="threat", description="Очертить красную линию (/threat тема)"),
-        BotCommand(command="pager", description="Реплаем: проверка связи безопасности"),
-        BotCommand(command="pay", description="Перевести шекели (/pay 50 @user)")
+        BotCommand(command="pager", description="Реплаем: проверка пейджера (или «Пейджер»)"),
+        BotCommand(command="pay", description="Реплаем: перевести шекели (или «Откат 50»)")
     ]
     await bot_instance.set_my_commands(commands)
     print("--> Команды меню успешно зарегистрированы в Telegram.", flush=True)
@@ -250,29 +274,13 @@ async def apply_chat_mute(message: Message, user_id: int, minutes: int, reason: 
     except Exception:
         await message.reply("⚠️ Юридический советник заблокировал изоляцию (нет прав админа у бота), но факт нарушения занесен в реестр.")
 
-# --- КОМАНДЫ ПУЛЬТА И ДОСЬЕ ---
-@dp.message(Command("menu"))
-@dp.message(CommandStart())
-async def cmd_menu(message: Message):
-    text = (
-        "🏛 <b>Канцелярия премьер-министра Израиля</b>\n\n"
-        "Оперативный пульт коалиции активирован. Нажмите директиву или введите задачу в чат:"
-    )
-    await message.reply(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
-
-@dp.message(Command("dossier"))
-async def cmd_dossier(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def build_dossier_text(user: dict) -> str:
     bloc = await get_user_bloc(user["bloc_id"])
     bloc_title = f"{bloc['name']} (Куратор: {bloc['sponsor']})" if bloc else "Внефракционный одиночка"
     
     now_iso = datetime.now().isoformat()
-    dome_status = "Не активен"
-    if user["immune_until"] and user["immune_until"] > now_iso:
-        dome_status = "🛡 Активен"
-    bunker_status = "Не активен"
-    if user["bunker_until"] and user["bunker_until"] > now_iso:
-        bunker_status = "🚪 В укрытии (Иммунитет к ШАБАК)"
+    dome_status = "🛡 Активен" if (user["immune_until"] and user["immune_until"] > now_iso) else "Не активен"
+    bunker_status = "🚪 В укрытии (Иммунитет к ШАБАК)" if (user["bunker_until"] and user["bunker_until"] > now_iso) else "Не активен"
 
     analysis = "Досье находится под грифом «Совершенно секретно»."
     if gemini_client:
@@ -287,7 +295,7 @@ async def cmd_dossier(message: Message):
         except Exception as e:
             print(f"Ошибка Gemini API: {e}", flush=True)
 
-    card = (
+    return (
         f"🏛 <b>ГОСУДАРСТВЕННЫЙ РЕЕСТР КОАЛИЦИИ</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>Субъект:</b> {user['full_name']}\n"
@@ -301,12 +309,60 @@ async def cmd_dossier(message: Message):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 <b>Резолюция канцелярии премьера:</b>\n<i>«{analysis}»</i>"
     )
+
+# --- ЛОГИКА ОСНОВНЫХ КОМАНД ---
+async def logic_menu(message: Message):
+    text = (
+        "🏛 <b>Канцелярия премьер-министра Израиля</b>\n\n"
+        "Оперативный пульт коалиции активирован. Можно жать кнопки или писать команды прямо в чат по-русски "
+        "(<i>Досье, Гешефт, Удар, Сигары, Буфет, Слоты 50</i>):"
+    )
+    await message.reply(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+async def logic_dossier(message: Message, args_str: str = None):
+    # Сохраняем вызывающего в БД
+    await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    
+    target_user = None
+    # 1. Если это ответ (реплай) на чье-то сообщение — берем автора того сообщения
+    if message.reply_to_message and message.reply_to_message.from_user:
+        t = message.reply_to_message.from_user
+        if t.is_bot:
+            await message.reply("🤖 У роботов канцелярии нет политических амбиций и счетов в банке.")
+            return
+        target_user = await get_or_create_user(t.id, t.full_name, t.username)
+    
+    # 2. Если передан @username или текстовое упоминание (text_mention)
+    elif args_str or message.entities:
+        if message.entities:
+            for ent in message.entities:
+                if ent.type == "text_mention" and ent.user:
+                    target_user = await get_or_create_user(ent.user.id, ent.user.full_name, ent.user.username)
+                    break
+        if not target_user and args_str:
+            word = args_str.split()[0]
+            if word.startswith("@"):
+                target_user = await get_user_by_username(word)
+                if not target_user:
+                    await message.reply(
+                        f"🕵️‍♂️ Агент <b>{word}</b> ещё не засветился в базе ШАБАК.\n"
+                        f"Пусть напишет хотя бы одно сообщение в чат, или вызовите «Досье» ответом (реплаем) на его сообщение!",
+                        parse_mode="HTML"
+                    )
+                    return
+
+    # 3. Если никого не отметили — показываем досье самого автора
+    if not target_user:
+        target_user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+
+    card = await build_dossier_text(target_user)
     await message.reply(card, parse_mode="HTML")
 
-# --- ЭКОНОМИКА: ГЕШЕФТ, ВЗЯТКИ, ПЕРЕВОДЫ ---
-@dp.message(Command("gesheft"))
-async def cmd_gesheft(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_gesheft(message: Message, u_id: int = None, u_name: str = None, u_username: str = None):
+    uid = u_id or message.from_user.id
+    uname = u_name or message.from_user.full_name
+    uuser = u_username or message.from_user.username
+    user = await get_or_create_user(uid, uname, uuser)
     now = datetime.now()
     
     if user["last_gesheft"]:
@@ -318,17 +374,19 @@ async def cmd_gesheft(message: Message):
             return
 
     reward = random.randint(35, 75) + (user["rank"] * 10)
-    await update_user(message.from_user.id, shekels=user["shekels"] + reward, last_gesheft=now.isoformat())
+    await update_user(uid, shekels=user["shekels"] + reward, last_gesheft=now.isoformat())
     await message.reply(
         f"💰 <b>Гешефт успешно оформлен!</b>\n"
         f"Списано по статье: «Закупка противодиверсионных фиников для канцелярии».\n"
-        f"Вам начислено: <b>+{reward} ₪</b>.",
+        f"Гражданину {user['full_name']} начислено: <b>+{reward} ₪</b>.",
         parse_mode="HTML"
     )
 
-@dp.message(Command("bribe"))
-async def cmd_bribe(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_bribe(message: Message, u_id: int = None, u_name: str = None, u_username: str = None):
+    uid = u_id or message.from_user.id
+    uname = u_name or message.from_user.full_name
+    uuser = u_username or message.from_user.username
+    user = await get_or_create_user(uid, uname, uuser)
     if is_shabbat():
         await message.reply("🕯 <b>Шаббат шалом!</b> Брать и давать взятки в святой день строжайше запрещено раввинатом.", parse_mode="HTML")
         return
@@ -337,33 +395,32 @@ async def cmd_bribe(message: Message):
         return
     
     new_loyalty = min(100, user["loyalty"] + 15)
-    await update_user(message.from_user.id, loyalty=new_loyalty, shekels=user["shekels"] - 50)
+    await update_user(uid, loyalty=new_loyalty, shekels=user["shekels"] - 50)
     await message.reply(
-        "🍾 <b>Поставка дипломатической почтой оформлена.</b>\n"
-        "Ящик кубинских сигар доставлен в резиденцию в Кейсарии. Ваша лояльность выросла на <b>+15%</b>.",
+        f"🍾 <b>Поставка дипломатической почтой от {user['full_name']} оформлена.</b>\n"
+        "Ящик кубинских сигар доставлен в резиденцию в Кейсарии. Лояльность выросла на <b>+15%</b>.",
         parse_mode="HTML"
     )
 
-@dp.message(Command("pay"))
-async def cmd_pay(message: Message, command: CommandObject):
-    if not command.args or not message.reply_to_message:
-        await message.reply("Использование: ответьте на сообщение получателя командой <code>/pay 50</code>", parse_mode="HTML")
+async def logic_pay(message: Message, args_str: str):
+    if not args_str or not message.reply_to_message:
+        await message.reply("Использование: ответьте на сообщение получателя и напишите <code>/pay 50</code> или <code>Откат 50</code>", parse_mode="HTML")
         return
     try:
-        amount = int(command.args.strip())
+        amount = int(args_str.strip().split()[0])
         if amount <= 0:
             raise ValueError
     except ValueError:
         await message.reply("Укажите корректную сумму шекелей цифрами.")
         return
 
-    sender = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    sender = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if sender["shekels"] < amount:
         await message.reply("У вас недостаточно шекелей для осуществления финансовой проводки.")
         return
 
     target_user = message.reply_to_message.from_user
-    receiver = await get_or_create_user(target_user.id, target_user.full_name)
+    receiver = await get_or_create_user(target_user.id, target_user.full_name, target_user.username)
 
     tax = int(amount * 0.10)
     net_amount = amount - tax
@@ -378,10 +435,8 @@ async def cmd_pay(message: Message, command: CommandObject):
         parse_mode="HTML"
     )
 
-# --- РАНГОВЫЕ ДЕЙСТВИЯ: ПРОТЕСТ, ПОБОРЫ, АУДИТ, КОМПРОМАТ, ВЕТО ---
-@dp.message(Command("protest"))
-async def cmd_protest(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_protest(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     outcome = random.random()
     if outcome < 0.70:
         await apply_chat_mute(
@@ -395,9 +450,8 @@ async def cmd_protest(message: Message):
         await update_user(message.from_user.id, shekels=user["shekels"] + grant, loyalty=max(0, user["loyalty"] - 5))
         await message.reply(f"📢 <b>Митинг устоял!</b> Зарубежный фонд выделил вам грант за защиту демократии: <b>+{grant} ₪</b> (лояльность -5%).", parse_mode="HTML")
 
-@dp.message(Command("shakedown"))
-async def cmd_shakedown(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_shakedown(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 1:
         await message.reply("Вы ещё не доросли до права трясти ларьки. Достигните хотя бы Ранга 1.")
         return
@@ -406,7 +460,7 @@ async def cmd_shakedown(message: Message):
         return
     
     target_obj = message.reply_to_message.from_user
-    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name, target_obj.username)
     
     if victim["rank"] >= 1:
         await message.reply("Коллег по муниципальному аппарату трясти нельзя — жалуйтесь выше.")
@@ -421,18 +475,17 @@ async def cmd_shakedown(message: Message):
         parse_mode="HTML"
     )
 
-@dp.message(Command("audit"))
-async def cmd_audit(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_audit(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 3:
         await message.reply("Назначать налоговые проверки разрешено только с Ранга 3 (Глава комиссии).")
         return
     if not message.reply_to_message:
-        await message.reply("Ответьте на сообщение цели командой /audit.")
+        await message.reply("Ответьте на сообщение цели реплаем.")
         return
 
     target_obj = message.reply_to_message.from_user
-    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name, target_obj.username)
     
     now_iso = datetime.now().isoformat()
     if victim["immune_until"] and victim["immune_until"] > now_iso:
@@ -449,9 +502,8 @@ async def cmd_audit(message: Message):
         parse_mode="HTML"
     )
 
-@dp.message(Command("kompromat"))
-async def cmd_kompromat(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_kompromat(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 4:
         await message.reply("Аппаратные войны компроматов доступны только министрам кабинета (Ранг 4+).")
         return
@@ -460,7 +512,7 @@ async def cmd_kompromat(message: Message):
         return
 
     target_obj = message.reply_to_message.from_user
-    victim = await get_or_create_user(target_obj.id, target_obj.full_name)
+    victim = await get_or_create_user(target_obj.id, target_obj.full_name, target_obj.username)
 
     cost = 100
     if user["shekels"] < cost:
@@ -485,9 +537,8 @@ async def cmd_kompromat(message: Message):
             "Клевета на коллег по коалиции и фальсификация документов канцелярии."
         )
 
-@dp.message(Command("martial_law"))
-async def cmd_martial_law(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_martial_law(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 4:
         await message.reply("Объявлять чрезвычайное положение могут только члены узкого кабинета (Ранг 4+).")
         return
@@ -501,9 +552,8 @@ async def cmd_martial_law(message: Message):
         parse_mode="HTML"
     )
 
-@dp.message(Command("veto"))
-async def cmd_veto(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_veto(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 5:
         await message.reply("Право абсолютного вето принадлежит исключительно любимчику премьера (Ранг 5).")
         return
@@ -513,18 +563,16 @@ async def cmd_veto(message: Message):
         parse_mode="HTML"
     )
 
-# --- ПАРТИЙНЫЕ БЛОКИ (ФРАКЦИИ) ---
-@dp.message(Command("found_bloc"))
-async def cmd_found_bloc(message: Message, command: CommandObject):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_found_bloc(message: Message, args_str: str):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["rank"] < 2:
         await message.reply("Основывать собственные партии разрешено только с Ранга 2 (Депутат Кнессета).")
         return
-    if not command.args:
+    if not args_str:
         await message.reply("Укажите название партии: <code>/found_bloc Блок радикальных евреев Умани</code>", parse_mode="HTML")
         return
 
-    name = command.args.strip()
+    name = args_str.strip()
     cost = 350
     if user["shekels"] < cost:
         await message.reply(f"Регистрация фракции в Минюсте стоит {cost} ₪. У вас недостаточно средств.")
@@ -546,9 +594,8 @@ async def cmd_found_bloc(message: Message, command: CommandObject):
     except Exception:
         await message.reply("Фракция с таким названием уже существует в реестре Кнессета.")
 
-@dp.message(Command("bloc_sponsor"))
-async def cmd_bloc_sponsor(message: Message, command: CommandObject):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+async def logic_bloc_sponsor(message: Message, args_str: str):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if not user["bloc_id"]:
         await message.reply("Вы не состоите ни в одной фракции.")
         return
@@ -556,34 +603,32 @@ async def cmd_bloc_sponsor(message: Message, command: CommandObject):
     if bloc["leader_id"] != user["user_id"]:
         await message.reply("Только лидер фракции может менять внешнего куратора.")
         return
-    if not command.args:
+    if not args_str:
         await message.reply("Укажите вектор: <code>/bloc_sponsor Умань (Брацлавский транзит)</code>", parse_mode="HTML")
         return
 
-    sponsor = command.args.strip()
+    sponsor = args_str.strip()
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE blocs SET sponsor = ? WHERE bloc_id = ?", (sponsor, bloc["bloc_id"]))
         await db.commit()
     await message.reply(f"🌍 <b>Внешний вектор фракции «{bloc['name']}» изменен:</b> {sponsor}.", parse_mode="HTML")
 
-# --- КАЗИНО «МИФАЛЬ ХА-БЛЕФ» И НАПЕРСТКИ ---
-@dp.message(Command("slots"))
-async def cmd_slots(message: Message, command: CommandObject):
+async def logic_slots(message: Message, args_str: str):
     if is_shabbat():
         await message.reply("🕯 Казино «Мифаль ха-Блеф» опечатано Главным раввинатом до исхода субботы.")
         return
-    if not command.args:
-        await message.reply("Использование: <code>/slots 50</code> (ставка в шекелях).", parse_mode="HTML")
+    if not args_str:
+        await message.reply("Использование: <code>/slots 50</code> или <code>Слоты 50</code> (ставка в шекелях).", parse_mode="HTML")
         return
     try:
-        bet = int(command.args.strip())
+        bet = int(args_str.strip().split()[0])
         if bet <= 0:
             raise ValueError
     except ValueError:
         await message.reply("Укажите корректную сумму ставки цифрами.")
         return
 
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["shekels"] < bet:
         await message.reply(f"В вашей казне недостаточно шекелей (баланс: {user['shekels']} ₪).")
         return
@@ -623,14 +668,13 @@ async def cmd_slots(message: Message, command: CommandObject):
 
     await message.reply(text, parse_mode="HTML")
 
-@dp.message(Command("thimbles"))
-async def cmd_thimbles(message: Message, command: CommandObject):
+async def logic_thimbles(message: Message, args_str: str):
     if is_shabbat():
         await message.reply("🕯 В Шаббат напёрсточники на шуке Кармель закрыты.")
         return
-    args = command.args.split() if command.args else []
+    args = args_str.split() if args_str else []
     if len(args) != 2:
-        await message.reply("Использование: <code>/thimbles &lt;ставка&gt; &lt;номер 1, 2 или 3&gt;</code>", parse_mode="HTML")
+        await message.reply("Использование: <code>/thimbles &lt;ставка&gt; &lt;1-3&gt;</code> или <code>Наперстки 30 1</code>", parse_mode="HTML")
         return
     try:
         bet = int(args[0])
@@ -641,7 +685,7 @@ async def cmd_thimbles(message: Message, command: CommandObject):
         await message.reply("Укажите ставку и число от 1 до 3.")
         return
 
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     if user["shekels"] < bet:
         await message.reply("Недостаточно средств для игры с напёрсточниками.")
         return
@@ -663,9 +707,7 @@ async def cmd_thimbles(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
-# --- СПЕЦБУФЕТ (МАГАЗИН) ---
-@dp.message(Command("shop"))
-async def cmd_shop(message: Message):
+async def logic_shop(message: Message):
     text = (
         "🛍 <b>СПЕЦБУФЕТ КАНЦЕЛЯРИИ ПРЕМЬЕРА</b>\n"
         "Товары двойного назначения и дипломатические привилегии:\n\n"
@@ -676,7 +718,6 @@ async def cmd_shop(message: Message):
     )
     await message.reply(text, reply_markup=get_shop_keyboard(), parse_mode="HTML")
 
-# --- СТАРЫЕ ДИРЕКТИВЫ: УДАР, КРАСНАЯ ЛИНИЯ, ПЕЙДЖЕР ---
 async def execute_strike(target_user, chat_id: int, reply_func, restrict_func):
     outcome = random.random()
     win_threshold = 0.35 + (target_user["rank"] * 0.05)
@@ -724,14 +765,8 @@ async def execute_strike(target_user, chat_id: int, reply_func, restrict_func):
         except Exception:
             await reply_func("💥 Провал операции! Юридический советник спас от мута, но 40 ₪ списаны.")
 
-@dp.message(Command("strike"))
-async def cmd_strike(message: Message):
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
-    await execute_strike(user, message.chat.id, message.reply, message.bot.restrict_chat_member)
-
-@dp.message(Command("threat"))
-async def cmd_threat(message: Message, command: CommandObject):
-    topic = command.args or "активность левых активистов"
+async def logic_threat(message: Message, args_str: str):
+    topic = args_str or "активность левых активистов"
     enrichment = random.randint(75, 99)
     await message.reply(
         f"🔴 <b>КРАСНАЯ ЛИНИЯ ОЧЕРЧЕНА</b>\n"
@@ -741,10 +776,9 @@ async def cmd_threat(message: Message, command: CommandObject):
         parse_mode="HTML"
     )
 
-@dp.message(Command("pager"))
-async def cmd_pager(message: Message):
+async def logic_pager(message: Message):
     if not message.reply_to_message:
-        await message.reply("Директива применяется только ответом на сообщение подозреваемого.")
+        await message.reply("Директива применяется только ответом (реплаем) на сообщение подозреваемого.")
         return
     target = message.reply_to_message.from_user.full_name
     await message.reply(
@@ -754,29 +788,117 @@ async def cmd_pager(message: Message):
         parse_mode="HTML"
     )
 
+# --- ОБРАБОТЧИКИ СЛЭШ-КОМАНД (/command) ---
+@dp.message(Command("menu"))
+@dp.message(CommandStart())
+async def cmd_menu(message: Message):
+    await logic_menu(message)
+
+@dp.message(Command("dossier", "profile"))
+async def cmd_dossier(message: Message):
+    parts = message.text.split(maxsplit=1)
+    args = parts[1] if len(parts) > 1 else None
+    await logic_dossier(message, args)
+
+@dp.message(Command("gesheft"))
+async def cmd_gesheft(message: Message):
+    await logic_gesheft(message)
+
+@dp.message(Command("bribe"))
+async def cmd_bribe(message: Message):
+    await logic_bribe(message)
+
+@dp.message(Command("pay"))
+async def cmd_pay(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_pay(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("protest"))
+async def cmd_protest(message: Message):
+    await logic_protest(message)
+
+@dp.message(Command("shakedown"))
+async def cmd_shakedown(message: Message):
+    await logic_shakedown(message)
+
+@dp.message(Command("audit"))
+async def cmd_audit(message: Message):
+    await logic_audit(message)
+
+@dp.message(Command("kompromat"))
+async def cmd_kompromat(message: Message):
+    await logic_kompromat(message)
+
+@dp.message(Command("martial_law"))
+async def cmd_martial_law(message: Message):
+    await logic_martial_law(message)
+
+@dp.message(Command("veto"))
+async def cmd_veto(message: Message):
+    await logic_veto(message)
+
+@dp.message(Command("found_bloc"))
+async def cmd_found_bloc(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_found_bloc(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("bloc_sponsor"))
+async def cmd_bloc_sponsor(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_bloc_sponsor(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("slots"))
+async def cmd_slots(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_slots(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("thimbles"))
+async def cmd_thimbles(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_thimbles(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("shop"))
+async def cmd_shop(message: Message):
+    await logic_shop(message)
+
+@dp.message(Command("strike"))
+async def cmd_strike(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    await execute_strike(user, message.chat.id, message.reply, message.bot.restrict_chat_member)
+
+@dp.message(Command("threat"))
+async def cmd_threat(message: Message):
+    parts = message.text.split(maxsplit=1)
+    await logic_threat(message, parts[1] if len(parts) > 1 else "")
+
+@dp.message(Command("pager"))
+async def cmd_pager(message: Message):
+    await logic_pager(message)
+
 # --- ОБРАБОТКА ИНЛАЙН КНОПОК ---
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery):
     data = callback.data
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.full_name)
+    user = await get_or_create_user(callback.from_user.id, callback.from_user.full_name, callback.from_user.username)
 
     if data == "btn_strike":
         await execute_strike(user, callback.message.chat.id, callback.message.reply, callback.bot.restrict_chat_member)
         await callback.answer()
     elif data == "btn_dossier":
-        await cmd_dossier(callback.message)
+        card = await build_dossier_text(user)
+        await callback.message.reply(card, parse_mode="HTML")
         await callback.answer()
     elif data == "btn_gesheft":
-        await cmd_gesheft(callback.message)
+        await logic_gesheft(callback.message, callback.from_user.id, callback.from_user.full_name, callback.from_user.username)
         await callback.answer()
     elif data == "btn_bribe":
-        await cmd_bribe(callback.message)
+        await logic_bribe(callback.message, callback.from_user.id, callback.from_user.full_name, callback.from_user.username)
         await callback.answer()
     elif data == "btn_shop":
-        await cmd_shop(callback.message)
+        await logic_shop(callback.message)
         await callback.answer()
     elif data == "btn_slots_info":
-        await callback.message.reply("Чтобы сыграть в слоты, введите: <code>/slots &lt;ставка&gt;</code> (например: /slots 50)", parse_mode="HTML")
+        await callback.message.reply("Чтобы сыграть в слоты, напишите в чат: <code>Слоты 50</code> или <code>/slots 50</code>", parse_mode="HTML")
         await callback.answer()
     elif data == "btn_back":
         await callback.message.edit_text("Оперативный пульт коалиции активирован:", reply_markup=get_main_keyboard())
@@ -812,10 +934,10 @@ async def process_callbacks(callback: CallbackQuery):
                 await callback.answer("Недостаточно шекелей!", show_alert=True)
                 return
             await update_user(user["user_id"], shekels=user["shekels"] - 400)
-            await callback.message.reply("📟 <b>Заминированный пейджер добавлен в ваш инвентарь.</b> Используйте реплаем /pager для ликвидации.", parse_mode="HTML")
+            await callback.message.reply("📟 <b>Заминированный пейджер добавлен в ваш инвентарь.</b> Используйте реплаем слово «Пейджер» или /pager.", parse_mode="HTML")
             await callback.answer()
 
-# --- ДВУХКОНТУРНЫЙ СЕМАНТИЧЕСКИЙ АНАЛИЗАТОР И ЧАТ-ЛОГИКА ---
+# --- ТЕКСТОВЫЕ КОМАНДЫ БЕЗ СЛЭША, ДИАЛОГ И ПРОСЛУШКА ЧАТА ---
 TRIGGER_WORDS = {
     "цахал", "моссад", "шабак", "купол", "меркав", "пейджер", "бункер", "кирь",
     "биби", "нетаньяху", "ликуд", "коалици", "реформ", "побед", "сигар",
@@ -827,15 +949,75 @@ TRIGGER_WORDS = {
 
 @dp.message(F.text)
 async def handle_chat_messages(message: Message):
-    text_lower = message.text.lower()
+    raw_text = message.text.strip()
+    text_lower = raw_text.lower()
+    words = raw_text.split(maxsplit=1)
+    first_word = words[0].lower().rstrip(".,!?") if words else ""
+    rest_args = words[1] if len(words) > 1 else ""
+
+    # Автоматическая регистрация/обновление юзернейма при любом сообщении
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+
+    # 1. ПРОВЕРКА РУССКИХ ТЕКСТОВЫХ КОМАНД В СТИЛЕ «ИРИСА»
+    # Досье / Анкета / Профиль (работает само по себе, реплаем или с @username)
+    if first_word in ["досье", "анкета", "профиль", "кто"] and (not rest_args or rest_args.startswith("@") or len(rest_args.split()) == 1):
+        await logic_dossier(message, rest_args if rest_args else None)
+        return
+
+    # Одиночные текстовые команды (срабатывают, когда написаны одним словом)
+    if not rest_args:
+        if first_word in ["пульт", "меню", "коалиция"]:
+            await logic_menu(message)
+            return
+        elif first_word in ["гешефт", "распил", "казна"]:
+            await logic_gesheft(message)
+            return
+        elif first_word in ["взятка", "сигары", "занести"]:
+            await logic_bribe(message)
+            return
+        elif first_word in ["удар", "атака"]:
+            await execute_strike(user, message.chat.id, message.reply, message.bot.restrict_chat_member)
+            return
+        elif first_word in ["магазин", "буфет", "спецбуфет"]:
+            await logic_shop(message)
+            return
+        elif first_word in ["протест", "митинг", "каплан"]:
+            await logic_protest(message)
+            return
+        elif first_word in ["ларек", "ларёк", "потрусить", "штраф"]:
+            await logic_shakedown(message)
+            return
+        elif first_word in ["аудит", "проверка", "налоговая"]:
+            await logic_audit(message)
+            return
+        elif first_word in ["компромат", "слив"]:
+            await logic_kompromat(message)
+            return
+        elif first_word in ["вето"]:
+            await logic_veto(message)
+            return
+        elif first_word in ["пейджер"]:
+            await logic_pager(message)
+            return
+
+    # Текстовые команды с аргументами (ставка или сумма)
+    if first_word in ["слоты", "казино", "рулетка"] and rest_args:
+        await logic_slots(message, rest_args)
+        return
+    elif first_word in ["наперстки", "напёрстки"] and rest_args:
+        await logic_thimbles(message, rest_args)
+        return
+    elif first_word in ["откат", "перевод", "дать"] and rest_args and message.reply_to_message:
+        await logic_pay(message, rest_args)
+        return
+
+    # 2. ПРЯМОЙ ДИАЛОГ С БИБИ (Упоминание или реплай на сообщение бота)
     bot_info = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_info.id
-    is_mentioned = f"@{bot_info.username}" in message.text if bot_info.username else False
-
-    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    is_mentioned = f"@{bot_info.username.lower()}" in text_lower if bot_info.username else False
 
     if is_reply_to_bot or is_mentioned:
-        clean_text = message.text.replace(f"@{bot_info.username}", "").strip() if bot_info.username else message.text
+        clean_text = raw_text.replace(f"@{bot_info.username}", "").strip() if bot_info.username else raw_text
         
         system_instruction = (
             "Ты — Биньямин Нетаньяху (Биби), премьер-министр Израиля. Ты циничный, непоколебимый, авторитарный "
@@ -861,6 +1043,7 @@ async def handle_chat_messages(message: Message):
             await message.reply("Спецсвязь с бункером временно отключена.")
             return
 
+    # 3. ФОНОВЫЙ СЕМАНТИЧЕСКИЙ ТРЕКЕР (ШАБАК)
     now_iso = datetime.now().isoformat()
     if user["bunker_until"] and user["bunker_until"] > now_iso:
         return
@@ -877,7 +1060,7 @@ async def handle_chat_messages(message: Message):
                 "- Если реплика хвалит премьера, армию, победы, или радуется разгрому/провалу врагов (ХАМАС, Иран, Хезболла) -> верни число от +1 до +3.\n"
                 "- Если реплика критикует власть, коалицию, выражает пораженчество, сочувствует врагам или протестам -> верни число от -1 до -3.\n"
                 "- Если нейтрально или контекст бытовой -> верни 0.\n"
-                f"Реплика: \"{message.text}\"\n"
+                f"Реплика: \"{raw_text}\"\n"
                 "Формат: строго одно целое число."
             )
             res = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=eval_prompt)
@@ -915,7 +1098,6 @@ async def health_check(request):
     return web.Response(text="Bibi coalition is strong and resilient. 200 OK")
 
 async def main():
-    # 1. ПЕРВЫМ ДЕЛОМ запускаем веб-сервер, чтобы Render мгновенно увидел открытый порт
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -928,10 +1110,8 @@ async def main():
     await site.start()
     print(f"--> Веб-сервер успешно привязан к 0.0.0.0:{port}", flush=True)
     
-    # 2. Инициализируем базу данных
     await init_db()
     
-    # 3. В фоне регистрируем команды, не задерживая старт поллинга
     try:
         await set_bot_commands(bot)
     except Exception as e:
