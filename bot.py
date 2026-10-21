@@ -469,4 +469,472 @@ async def cmd_kompromat(message: Message):
 
     await update_user(user["user_id"], shekels=user["shekels"] - cost)
     success = random.random() < 0.60
-    if 
+        if success:
+        new_loyalty = max(0, victim["loyalty"] - 30)
+        await update_user(victim["user_id"], loyalty=new_loyalty)
+        await message.reply(
+            f"📁 <b>Слив в прессу удался!</b>\n"
+            f"На министра {victim['full_name']} заведено «Дело 5000». Лояльность сбита на <b>-30%</b>, позиции в коалиции пошатнулись!",
+            parse_mode="HTML"
+        )
+    else:
+        await apply_chat_mute(
+            message,
+            user["user_id"],
+            20,
+            "Клевета на коллег по коалиции и фальсификация документов канцелярии."
+        )
+
+@dp.message(Command("martial_law"))
+async def cmd_martial_law(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 4:
+        await message.reply("Объявлять чрезвычайное положение могут только члены узкого кабинета (Ранг 4+).")
+        return
+    until = datetime.now() + timedelta(minutes=20)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("INSERT OR REPLACE INTO system_state (key, value) VALUES ('martial_law', ?)", (until.isoformat(),))
+        await db.commit()
+    await message.reply(
+        "🚨 <b>ВНИМАНИЕ! В ЧАТЕ ОБЪЯВЛЕНО ВОЕННОЕ ПОЛОЖЕНИЕ НА 20 МИНУТ!</b>\n"
+        "Любая критика премьера или коалиции карается немедленной изоляцией без предупреждения.",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("veto"))
+async def cmd_veto(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 5:
+        await message.reply("Право абсолютного вето принадлежит исключительно любимчику премьера (Ранг 5).")
+        return
+    await message.reply(
+        f"👑 <b>АБСОЛЮТНОЕ ВЕТО КАНЦЕЛЯРИИ!</b>\n"
+        f"По прямому указанию {user['full_name']} любое решение, штраф или претензия аннулируются в пользу стабильности коалиции.",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("found_bloc"))
+async def cmd_found_bloc(message: Message, command: CommandObject):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["rank"] < 2:
+        await message.reply("Основывать собственные партии разрешено только с Ранга 2 (Депутат Кнессета).")
+        return
+    if not command.args:
+        await message.reply("Укажите название партии: <code>/found_bloc Блок радикальных евреев Умани</code>", parse_mode="HTML")
+        return
+
+    name = command.args.strip()
+    cost = 350
+    if user["shekels"] < cost:
+        await message.reply(f"Регистрация фракции в Минюсте стоит {cost} ₪. У вас недостаточно средств.")
+        return
+
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            cursor = await db.execute("INSERT INTO blocs (name, leader_id) VALUES (?, ?)", (name, user["user_id"]))
+            bloc_id = cursor.lastrowid
+            await db.execute("UPDATE users SET bloc_id = ?, shekels = shekels - ? WHERE user_id = ?", (bloc_id, cost, user["user_id"]))
+            await db.commit()
+        await message.reply(
+            f"🎉 <b>Партия официально зарегистрирована!</b>\n"
+            f"Фракция: <b>«{name}»</b>\n"
+            f"Лидер: {user['full_name']}\n"
+            f"Назначьте внешнего спонсора командой <code>/bloc_sponsor &lt;страна/город&gt;</code>.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        await message.reply("Фракция с таким названием уже существует в реестре Кнессета.")
+
+@dp.message(Command("bloc_sponsor"))
+async def cmd_bloc_sponsor(message: Message, command: CommandObject):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if not user["bloc_id"]:
+        await message.reply("Вы не состоите ни в одной фракции.")
+        return
+    bloc = await get_user_bloc(user["bloc_id"])
+    if bloc["leader_id"] != user["user_id"]:
+        await message.reply("Только лидер фракции может менять внешнего куратора.")
+        return
+    if not command.args:
+        await message.reply("Укажите вектор: <code>/bloc_sponsor Умань (Брацлавский транзит)</code>", parse_mode="HTML")
+        return
+
+    sponsor = command.args.strip()
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE blocs SET sponsor = ? WHERE bloc_id = ?", (sponsor, bloc["bloc_id"]))
+        await db.commit()
+    await message.reply(f"🌍 <b>Внешний вектор фракции «{bloc['name']}» изменен:</b> {sponsor}.", parse_mode="HTML")
+
+@dp.message(Command("slots"))
+async def cmd_slots(message: Message, command: CommandObject):
+    if is_shabbat():
+        await message.reply("🕯 Казино «Мифаль ха-Блеф» опечатано Главным раввинатом до исхода субботы.")
+        return
+    if not command.args:
+        await message.reply("Использование: <code>/slots 50</code> (ставка в шекелях).", parse_mode="HTML")
+        return
+    try:
+        bet = int(command.args.strip())
+        if bet <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply("Укажите корректную сумму ставки цифрами.")
+        return
+
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["shekels"] < bet:
+        await message.reply(f"В вашей казне недостаточно шекелей (баланс: {user['shekels']} ₪).")
+        return
+
+    symbols = ["🍾", "🚬", "🚁", "⚖️", "👑"]
+    weights = [30, 25, 25, 15, 5]
+    res = random.choices(symbols, weights=weights, k=3)
+
+    text = f"🎰 <b>ПОДПОЛЬНЫЙ СЛОТ-АВТОМАТ В ЭЙЛАТЕ:</b>\n[ {res[0]} | {res[1]} | {res[2]} ]\n\n"
+
+    if res[0] == res[1] == res[2]:
+        sym = res[0]
+        if sym == "👑":
+            win = bet * 10
+            await update_user(user["user_id"], shekels=user["shekels"] + win)
+            text += f"👑👑👑 <b>ВЕЧНЫЙ ПРЕМЬЕР! ДЖЕКПОТ x10!</b>\nВы сорвали <b>+{win} ₪</b>! В бункере гремит салют!"
+        elif sym == "🚬":
+            win = bet * 5
+            await update_user(user["user_id"], shekels=user["shekels"] + win)
+            text += f"🚬🚬🚬 <b>ДИПЛОМАТИЧЕСКИЙ ГРУЗ x5!</b>\nКонтрабанда прошла успешно: <b>+{win} ₪</b>."
+        elif sym == "🍾":
+            win = bet * 3
+            await update_user(user["user_id"], shekels=user["shekels"] + win, loyalty=min(100, user["loyalty"] + 10))
+            text += f"🍾🍾🍾 <b>ВИЛЛА В КЕЙСАРИИ x3!</b>\nВыигрыш: <b>+{win} ₪</b> и +10% к лояльности."
+        elif sym == "🚁":
+            win = bet * 2
+            await update_user(user["user_id"], shekels=user["shekels"] + win)
+            text += f"🚁🚁🚁 <b>УСПЕШНЫЙ АВИАНАЛЕТ x2!</b>\nВыигрыш: <b>+{win} ₪</b>."
+        elif sym == "⚖️":
+            await update_user(user["user_id"], shekels=user["shekels"] - bet)
+            await message.reply(text + "⚖️⚖️⚖️ <b>ПРИГОВОР ОКРУЖНОГО СУДА!</b>\nСтавка конфискована, вы отправляетесь на допрос!", parse_mode="HTML")
+            await apply_chat_mute(message, user["user_id"], 20, "Нелегальная игорная деятельность в Эйлате.")
+            return
+    else:
+        await update_user(user["user_id"], shekels=user["shekels"] - bet)
+        text += f"❌ Комбинация не сыграла. Казна потеряла: <b>-{bet} ₪</b>."
+
+    await message.reply(text, parse_mode="HTML")
+
+@dp.message(Command("thimbles"))
+async def cmd_thimbles(message: Message, command: CommandObject):
+    if is_shabbat():
+        await message.reply("🕯 В Шаббат напёрсточники на шуке Кармель закрыты.")
+        return
+    args = command.args.split() if command.args else []
+    if len(args) != 2:
+        await message.reply("Использование: <code>/thimbles &lt;ставка&gt; &lt;номер 1, 2 или 3&gt;</code>", parse_mode="HTML")
+        return
+    try:
+        bet = int(args[0])
+        choice = int(args[1])
+        if bet <= 0 or choice not in [1, 2, 3]:
+            raise ValueError
+    except ValueError:
+        await message.reply("Укажите ставку и число от 1 до 3.")
+        return
+
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user["shekels"] < bet:
+        await message.reply("Недостаточно средств для игры с напёрсточниками.")
+        return
+
+    win_pos = random.randint(1, 3)
+    if choice == win_pos:
+        win = int(bet * 2.5)
+        await update_user(user["user_id"], shekels=user["shekels"] + win)
+        await message.reply(
+            f"🎪 <b>Шук Кармель: ПОБЕДА!</b>\n"
+            f"Шекель лежал под наперстком [{win_pos}]! Вы раскусили трюк одесских репатриантов: <b>+{win} ₪</b>.",
+            parse_mode="HTML"
+        )
+    else:
+        await update_user(user["user_id"], shekels=user["shekels"] - bet)
+        await message.reply(
+            f"🎪 <b>Шук Кармель: ОБМАН!</b>\n"
+            f"Под стаканчиком [{choice}] ничего не было! Шекель был под [{win_pos}]. Вы потеряли <b>-{bet} ₪</b>.",
+            parse_mode="HTML"
+        )
+
+@dp.message(Command("shop"))
+async def cmd_shop(message: Message):
+    text = (
+        "🛍 <b>СПЕЦБУФЕТ КАНЦЕЛЯРИИ ПРЕМЬЕРА</b>\n"
+        "Товары двойного назначения и дипломатические привилегии:\n\n"
+        "🛡 <b>Железный купол (250 ₪):</b> Иммунитет от чужих штрафов, аудитов и ударов на 12 ч.\n"
+        "🚪 <b>Бункер Кирьи (500 ₪):</b> Полный щит от прослушки ШАБАК на 24 ч (лояльность не падает).\n"
+        "🍾 <b>Ящик Dom Pérignon (300 ₪):</b> Мгновенно аннулирует претензии суда (+25% лояльности).\n"
+        "📟 <b>Заминированный пейджер (400 ₪):</b> Разовый инструмент для нейтрализации конкурента."
+    )
+    await message.reply(text, reply_markup=get_shop_keyboard(), parse_mode="HTML")
+
+async def execute_strike(target_user, chat_id: int, reply_func, restrict_func):
+    outcome = random.random()
+    win_threshold = 0.35 + (target_user["rank"] * 0.05)
+    
+    if outcome < win_threshold:
+        gain = 50 + (target_user["rank"] * 15)
+        new_shekels = target_user["shekels"] + gain
+        until = datetime.now() + timedelta(hours=6)
+        await update_user(target_user["user_id"], shekels=new_shekels, immune_until=until.isoformat())
+        await reply_func(
+            f"🎯 <b>Превентивный удар завершен триумфом!</b>\n"
+            f"Ликвидирован бункер с вражескими центрифугами.\n"
+            f"Вам выделено <b>+{gain} ₪</b> и активирован «Железный купол» на 6 часов.",
+            parse_mode="HTML"
+        )
+    elif outcome < 0.70:
+        directive = "Никаких уступок. Мы продолжаем давить на всех дипломатических и военных фронтах."
+        if gemini_client:
+            try:
+                res = gemini_client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents="Сформулируй ультра-короткую жесткую директиву премьера Биби на закрытом заседании кабинета."
+                )
+                directive = res.text
+            except Exception:
+                pass
+        await reply_func(f"📜 <b>Закрытая директива премьера:</b>\n<i>«{directive}»</i>", parse_mode="HTML")
+    else:
+        new_shekels = max(0, target_user["shekels"] - 40)
+        await update_user(target_user["user_id"], shekels=new_shekels)
+        try:
+            mute_until = datetime.now() + timedelta(minutes=15)
+            await restrict_func(
+                chat_id=chat_id,
+                user_id=target_user["user_id"],
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=mute_until
+            )
+            await reply_func(
+                "💥 <b>ПРОВАЛ СПЕЦОПЕРАЦИИ!</b>\n"
+                "Ваша вылазка признана несогласованной авантюрой. Оппозиция требует суда.\n"
+                "Штраф: -40 ₪. Вы отправлены на допрос в подвал ШАБАК (мут на 15 минут).",
+                parse_mode="HTML"
+            )
+        except Exception:
+            await reply_func("💥 Провал операции! Юридический советник спас от мута, но 40 ₪ списаны.")
+
+@dp.message(Command("strike"))
+async def cmd_strike(message: Message):
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+    await execute_strike(user, message.chat.id, message.reply, message.bot.restrict_chat_member)
+
+@dp.message(Command("threat"))
+async def cmd_threat(message: Message, command: CommandObject):
+    topic = command.args or "активность левых активистов"
+    enrichment = random.randint(75, 99)
+    await message.reply(
+        f"🔴 <b>КРАСНАЯ ЛИНИЯ ОЧЕРЧЕНА</b>\n"
+        f"Объект угрозы: <b>{topic}</b>\n"
+        f"Уровень обогащения: <b>{enrichment}%</b>\n\n"
+        f"<i>«Мы не позволим пересечь эту черту. Все варианты действий лежат на столе премьера.»</i>",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("pager"))
+async def cmd_pager(message: Message):
+    if not message.reply_to_message:
+        await message.reply("Директива применяется только ответом на сообщение подозреваемого.")
+        return
+    target = message.reply_to_message.from_user.full_name
+    await message.reply(
+        f"📟 <b>Служба внешней безопасности:</b>\n"
+        f"На пейджер абонента <b>{target}</b> отправлен зашифрованный импульс.\n"
+        f"<tg-spoiler>⚠️ Внимание: Зафиксирован критический перегрев литиевого аккумулятора устройства!</tg-spoiler>",
+        parse_mode="HTML"
+    )
+
+@dp.callback_query()
+async def process_callbacks(callback: CallbackQuery):
+    data = callback.data
+    user = await get_or_create_user(callback.from_user.id, callback.from_user.full_name)
+
+    if data == "btn_strike":
+        await execute_strike(user, callback.message.chat.id, callback.message.reply, callback.bot.restrict_chat_member)
+        await callback.answer()
+    elif data == "btn_dossier":
+        await cmd_dossier(callback.message)
+        await callback.answer()
+    elif data == "btn_gesheft":
+        await cmd_gesheft(callback.message)
+        await callback.answer()
+    elif data == "btn_bribe":
+        await cmd_bribe(callback.message)
+        await callback.answer()
+    elif data == "btn_shop":
+        await cmd_shop(callback.message)
+        await callback.answer()
+    elif data == "btn_slots_info":
+        await callback.message.reply("Чтобы сыграть в слоты, введите: <code>/slots &lt;ставка&gt;</code> (например: /slots 50)", parse_mode="HTML")
+        await callback.answer()
+    elif data == "btn_back":
+        await callback.message.edit_text("Оперативный пульт коалиции активирован:", reply_markup=get_main_keyboard())
+        await callback.answer()
+    elif data.startswith("buy_"):
+        item = data.split("_")[1]
+        now = datetime.now()
+        if item == "dome":
+            if user["shekels"] < 250:
+                await callback.answer("Недостаточно шекелей на «Железный купол»!", show_alert=True)
+                return
+            until = now + timedelta(hours=12)
+            await update_user(user["user_id"], shekels=user["shekels"] - 250, immune_until=until.isoformat())
+            await callback.message.reply("🛡 <b>«Железный купол» развернут!</b> Полная защита от штрафов на 12 часов.", parse_mode="HTML")
+            await callback.answer()
+        elif item == "bunker":
+            if user["shekels"] < 500:
+                await callback.answer("Недостаточно шекелей на бункер!", show_alert=True)
+                return
+            until = now + timedelta(hours=24)
+            await update_user(user["user_id"], shekels=user["shekels"] - 500, bunker_until=until.isoformat())
+            await callback.message.reply("🚪 <b>Пропуск в бункер Кирьи активирован!</b> Иммунитет к прослушке ШАБАК на 24 часа.", parse_mode="HTML")
+            await callback.answer()
+        elif item == "champagne":
+            if user["shekels"] < 300:
+                await callback.answer("Недостаточно шекелей!", show_alert=True)
+                return
+            await update_user(user["user_id"], shekels=user["shekels"] - 300, loyalty=min(100, user["loyalty"] + 25))
+            await callback.message.reply("🍾 <b>Ящик Dom Pérignon доставлен!</b> Претензии суда сняты (+25% к лояльности).", parse_mode="HTML")
+            await callback.answer()
+        elif item == "pager":
+            if user["shekels"] < 400:
+                await callback.answer("Недостаточно шекелей!", show_alert=True)
+                return
+            await update_user(user["user_id"], shekels=user["shekels"] - 400)
+            await callback.message.reply("📟 <b>Заминированный пейджер добавлен в ваш инвентарь.</b> Используйте реплаем /pager для ликвидации.", parse_mode="HTML")
+            await callback.answer()
+
+TRIGGER_WORDS = {
+    "цахал", "моссад", "шабак", "купол", "меркав", "пейджер", "бункер", "кирь",
+    "биби", "нетаньяху", "ликуд", "коалици", "реформ", "побед", "сигар",
+    "шампанск", "левиафан", "шекел", "трамп", "авраамов", "каплан", "протест",
+    "митинг", "забастовк", "лапид", "ганц", "беннет", "оппозици", "перевыбор",
+    "гааг", "мус", "дело 4000", "коррупци", "провал", "поражени", "отставк",
+    "иран", "тегеран", "ксир", "хесболл", "хезболл", "хамас", "синвар"
+}
+
+@dp.message(F.text)
+async def handle_chat_messages(message: Message):
+    text_lower = message.text.lower()
+    bot_info = await message.bot.get_me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_info.id
+    is_mentioned = f"@{bot_info.username}" in message.text if bot_info.username else False
+
+    user = await get_or_create_user(message.from_user.id, message.from_user.full_name)
+
+    if is_reply_to_bot or is_mentioned:
+        clean_text = message.text.replace(f"@{bot_info.username}", "").strip() if bot_info.username else message.text
+        
+        system_instruction = (
+            "Ты — Биньямин Нетаньяху (Биби), премьер-министр Израиля. Ты циничный, непоколебимый, авторитарный "
+            "политический гроссмейстер. Используй термины: коалиция, Ликуд, Моссад, стратегическая стойкость, красные линии. "
+            f"Собеседник: {user['full_name']}, Ранг: [{user['rank']}] {user['role_title']}, Лояльность: {user['loyalty']}%. "
+            "Если лояльность низкая — унижай и презирай как уличного крикуна. Если высокая — общайся как с ценным сообщником. "
+            "Отвечай кратко, едко, держи образ великого правителя. Никаких извинений."
+        )
+
+        if gemini_client:
+            try:
+                response = gemini_client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents=f"{system_instruction}\n\nРеплика: {clean_text}"
+                )
+                await message.reply(response.text)
+                return
+            except Exception as e:
+                print(f"Ошибка Gemini API: {e}", flush=True)
+                await message.reply("Премьер находится на закрытом совещании в бункере Кирьи. Ожидайте официальное коммюнике.")
+                return
+        else:
+            await message.reply("Спецсвязь с бункером временно отключена.")
+            return
+
+    now_iso = datetime.now().isoformat()
+    if user["bunker_until"] and user["bunker_until"] > now_iso:
+        return
+
+    has_triggers = any(w in text_lower for w in TRIGGER_WORDS)
+    if not has_triggers:
+        return
+
+    if gemini_client:
+        try:
+            eval_prompt = (
+                "Ты — закрытый аналитический модуль канцелярии премьера Израиля Биньямина Нетаньяху. "
+                "Оцени реплику участника чата с точки зрения лояльности к премьеру, ЦАХАЛу и безопасности Израиля.\n"
+                "- Если реплика хвалит премьера, армию, победы, или радуется разгрому/провалу врагов (ХАМАС, Иран, Хезболла) -> верни число от +1 до +3.\n"
+                "- Если реплика критикует власть, коалицию, выражает пораженчество, сочувствует врагам или протестам -> верни число от -1 до -3.\n"
+                "- Если нейтрально или контекст бытовой -> верни 0.\n"
+                f"Реплика: \"{message.text}\"\n"
+                "Формат: строго одно целое число."
+            )
+            res = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=eval_prompt)
+            score_text = res.text.strip().replace("+", "")
+            delta = int(score_text)
+        except Exception:
+    delta = 0
+
+if delta != 0:
+    new_loyalty = max(0, min(100, user["loyalty"] + (delta * 3)))
+    await update_user(user["user_id"], loyalty=new_loyalty)
+    
+    if delta <= -2:
+        async with aiosqlite.connect(DB_FILE) as db:
+            cursor = await db.execute("SELECT value FROM system_state WHERE key = 'martial_law'")
+            row = await cursor.fetchone()
+            if row and row[0] > now_iso:
+                await apply_chat_mute(message, user["user_id"], 15, "Крамольные высказывания в период военного положения!")
+                return
+                
+        await message.reply(
+            f"👁 <b>ШАБАК фиксирует крамолу:</b>\n"
+            f"Субъект: {user['full_name']} (Лояльность: {new_loyalty}%). Дело передано в военный трибунал.",
+            parse_mode="HTML"
+        )
+    elif delta >= 2:
+        await message.reply(
+            f"📜 <b>Канцелярия премьера одобряет:</b>\n"
+            f"Государственная позиция {user['full_name']} отмечена. Лояльность выросла до {new_loyalty}%.",
+            parse_mode="HTML"
+        )
+
+async def health_check(request):
+    return web.Response(text="Bibi coalition is strong and resilient. 200 OK")
+
+async def main():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"--> Веб-сервер успешно привязан к 0.0.0.0:{port}", flush=True)
+    
+    await init_db()
+    
+    try:
+        await set_bot_commands(bot)
+    except Exception as e:
+        print(f"Предупреждение при регистрации команд: {e}", flush=True)
+    
+    print("--> Запуск Telegram поллинга...", flush=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print("КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ:", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
+        
